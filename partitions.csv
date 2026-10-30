@@ -1,0 +1,4 @@
+# Build-time size budget only (1.375 MiB). NEVER flash this table over Launcher.
+nvs,data,nvs,0x9000,0x5000,
+otadata,data,ota,0xe000,0x2000,
+app0,app,ota_0,0x10000,0x160000,

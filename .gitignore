@@ -1,0 +1,4 @@
+.pio/
+include/bot_config.h
+relay/.env
+relay/node_modules/
