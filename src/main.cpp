@@ -5,6 +5,7 @@
 #include <atomic>
 #include <nvs.h>
 #include "playback_pool.h"
+#include "body_lights.h"
 #if __has_include("bot_config.h")
 #include "bot_config.h"
 #else
@@ -295,6 +296,74 @@ static void updateTrial() {
     }
 }
 
+// StackChan body controller (I2C 0x6f); protocol from m5stack/StackChan-BSP.
+// Only RGB pin 13 and LED RAM are changed; servo power/output is left alone.
+// M5.begin() already enables the 5V expansion output that powers the LEDs.
+static constexpr uint8_t BODY_ADDR = 0x6f, BODY_LIGHTS = 12;
+static constexpr uint32_t BODY_I2C_HZ = 100000;
+enum class Lights : uint8_t { Probing, Ready, Unavailable };
+static Lights lights = Lights::Probing;
+static uint8_t lightAttempts = 0, lightFailures = 0;
+static uint32_t nextLightAt = 0;
+static int32_t lightColor = -1;
+
+static bool bodyPinBit(uint8_t reg, bool set) {
+    uint8_t value;
+    if (!M5.In_I2C.readRegister(BODY_ADDR, reg, &value, 1, BODY_I2C_HZ)) return false;
+    const uint8_t next = set ? value | 0x20 : value & ~0x20;  // expander pin 13
+    return next == value || M5.In_I2C.writeRegister8(BODY_ADDR, reg, next, BODY_I2C_HZ);
+}
+
+static bool writeBodyLights(uint16_t color) {
+    uint8_t bytes[BODY_LIGHTS * 2];  // RGB565, little endian
+    for (size_t i = 0; i < BODY_LIGHTS; ++i) {
+        bytes[2 * i] = color & 0xff;
+        bytes[2 * i + 1] = color >> 8;
+    }
+    return M5.In_I2C.writeRegister(BODY_ADDR, 0x30, bytes, sizeof bytes, BODY_I2C_HZ) &&
+           M5.In_I2C.writeRegister8(BODY_ADDR, 0x24, BODY_LIGHTS | 0x40, BODY_I2C_HZ);  // refresh
+}
+
+static bool initBodyLights() {
+    uint8_t version = 0;
+    if (!M5.In_I2C.readRegister(BODY_ADDR, 0x02, &version, 1, BODY_I2C_HZ) || !version || version == 0xff) return false;
+    return bodyPinBit(0x04, true) &&   // output direction
+           bodyPinBit(0x0c, false) &&  // no pull-down
+           bodyPinBit(0x0a, true) &&   // pull-up
+           bodyPinBit(0x14, false) &&  // push-pull
+           M5.In_I2C.writeRegister8(BODY_ADDR, 0x24, BODY_LIGHTS, BODY_I2C_HZ) && writeBodyLights(0);
+}
+
+// Red while the microphone is muted, rainbow while speaking, otherwise off.
+static void updateBodyLights() {
+    const uint32_t now = millis();
+    if (lights == Lights::Unavailable || int32_t(now - nextLightAt) < 0) return;
+    nextLightAt = now + 50;
+    if (lights == Lights::Probing) {
+        // The body controller can boot slowly; give it about a second.
+        if (initBodyLights()) {
+            lights = Lights::Ready;
+            lightColor = 0;
+            Serial.println("[bot] body lights ready");
+        } else if (++lightAttempts >= 6) {
+            lights = Lights::Unavailable;
+            Serial.println("[bot] body lights unavailable");
+        } else nextLightAt = now + 200;
+        return;
+    }
+    const BodyEffect effect = output ? BodyEffect::Speaking : muted ? BodyEffect::Muted : BodyEffect::Off;
+    const uint16_t color = bodyColor(effect, now);
+    if (color == lightColor) return;
+    if (writeBodyLights(color)) {
+        lightColor = color;
+        lightFailures = 0;
+    } else if (++lightFailures >= 3) {
+        writeBodyLights(0);
+        lights = Lights::Unavailable;
+        Serial.println("[bot] body lights failed; disabled");
+    } else nextLightAt = now + 1000;
+}
+
 static void drawFace() {
     auto &lcd = M5.Display;
     uint16_t color = !ready ? TFT_ORANGE : muted ? TFT_DARKGREY : TFT_CYAN;
@@ -464,6 +533,7 @@ void loop() {
             socket.sendBIN(reinterpret_cast<uint8_t *>(frame.samples), CHUNK);
         }
     }
+    updateBodyLights();
     if (relayConnected && int32_t(millis() - nextDeviceStatus) >= 0) {
         sendDeviceStatus();
         nextDeviceStatus = millis() + 5000;
