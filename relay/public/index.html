@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#193b38"><title>StackChan Studio</title>
+  <link rel="stylesheet" href="/dashboard.css"><script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#top"><span class="robot-mark" aria-hidden="true"><i></i><i></i><b></b></span><span>stackchan<span class="brand-sub">VOICE STUDIO</span></span></a>
+    <div class="sidebar-label">YOUR ROBOT, YOUR RULES</div>
+    <nav aria-label="Settings sections">
+      <a href="#behavior"><span>01</span> Personality</a>
+      <a href="#voice"><span>02</span> Model & voice</a>
+      <a href="#turns"><span>03</span> Conversation</a>
+      <a href="#advanced"><span>04</span> Tools & limits</a>
+      <a href="#robot"><span>05</span> Robot</a>
+    </nav>
+    <div class="sidebar-bottom"><span class="tiny-dot"></span> Local control room<p>Settings stay on this Mac.<br>API keys stay on the relay.</p></div>
+  </aside>
+  <main id="top">
+    <header class="page-header">
+      <div><p class="eyebrow">STACKCHAN / CONTROL ROOM</p><h1>Shape the conversation<span>.</span></h1><p class="intro">A little personality. A voice that fits. Make this robot yours.</p></div>
+      <div id="connectionBadge" class="badge neutral"><span></span><span id="connectionText">Connecting to relay</span></div>
+    </header>
+    <div id="pageError" class="notice error" role="alert" hidden></div>
+    <div class="workspace">
+      <form id="settingsForm" class="settings" autocomplete="off">
+        <section class="card" id="behavior">
+          <div class="section-heading"><div><p class="eyebrow">01 / PERSONALITY</p><h2>What kind of companion?</h2></div><span class="tag">System prompt</span></div>
+          <p class="help">Set its character, language, speaking style, and boundaries. Short, clear instructions work well.</p>
+          <label for="instructions" class="sr-only">System prompt</label>
+          <textarea id="instructions" name="instructions" maxlength="12000" rows="10" spellcheck="false" placeholder="You are StackChan, a friendly little robot…"></textarea>
+          <div class="field-footer"><span>Applied at the start of a new conversation</span><span id="promptCount">0 / 12,000</span></div>
+        </section>
+        <section class="card" id="voice">
+          <div class="section-heading"><div><p class="eyebrow">02 / MODEL & VOICE</p><h2>Give it a voice.</h2></div><span class="section-icon" aria-hidden="true">◖◗</span></div>
+          <div class="fields two">
+            <label>Voice model<select name="model" id="model" required></select><small id="modelHelp">Choose the model behind the conversation.</small></label>
+            <label>Voice<select name="voice" id="voiceSelect" required></select><small>Voice changes start a new conversation.</small></label>
+          </div>
+          <p id="providerNote" class="help" hidden>Azure deployment selection is managed in the relay configuration.</p>
+          <div id="liveNote" class="notice" hidden>GPT-Live bills connected time, including idle listening. Its voice settings are fixed when a session starts.</div>
+          <div class="fields two spaced">
+            <label>Speaking speed <output id="speedValue" for="speed">1.00×</output><input type="range" name="speed" id="speed" min="0.25" max="1.5" step="0.05"><small id="speedHelp">Changes the playback pace of generated speech.</small></label>
+            <label>Reasoning effort<select name="reasoningEffort" id="reasoningEffort"><option value="default">Model default</option><option value="minimal">Minimal · fastest</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select><small id="reasoningHelp">More reasoning can use more tokens and add delay.</small></label>
+          </div>
+        </section>
+        <section class="card" id="turns">
+          <div class="section-heading"><div><p class="eyebrow">03 / CONVERSATION</p><h2>Find a natural rhythm.</h2></div></div>
+          <fieldset id="turnSettings">
+            <div class="fields two">
+              <label>End-of-turn detection<select name="turnDetection" id="turnDetection"><option value="server_vad">Silence detection</option><option value="semantic_vad">Semantic detection</option></select><small>Decides when you've finished speaking.</small></label>
+              <label>Microphone noise reduction<select name="noiseReduction"><option value="off">Off</option><option value="near_field">Near field · close talking</option><option value="far_field">Far field · room microphone</option></select><small>Filter input before speech detection and the model.</small></label>
+            </div>
+            <fieldset id="silenceSettings" class="fields three spaced">
+              <label>Speech threshold<output id="thresholdValue" for="vadThreshold">0.50</output><input type="range" name="vadThreshold" id="vadThreshold" min="0" max="1" step="0.05"><small>Higher requires louder speech.</small></label>
+              <label>Silence before reply <span class="input-unit"><input name="silenceDurationMs" type="number" min="100" max="3000" step="50" required><span>ms</span></span><small>Longer allows more pauses.</small></label>
+              <label>Speech prefix <span class="input-unit"><input name="prefixPaddingMs" type="number" min="0" max="2000" step="50" required><span>ms</span></span><small>Keeps the start of your words.</small></label>
+            </fieldset>
+            <label id="semanticSettings" class="spaced" hidden>Response eagerness<select name="eagerness"><option value="auto">Automatic</option><option value="low">Low · more time to finish</option><option value="medium">Medium</option><option value="high">High · quicker replies</option></select><small>How quickly semantic detection decides your turn is complete.</small></label>
+          </fieldset>
+          <p id="turnHelp" class="footnote">The robot automatically replies after your turn. Its microphone pauses during playback.</p>
+        </section>
+        <section class="card" id="advanced">
+          <div class="section-heading"><div><p class="eyebrow">04 / TOOLS & LIMITS</p><h2>A few finishing touches.</h2></div></div>
+          <div class="fields two">
+            <label>Maximum response tokens<input name="maxOutputTokens" id="maxOutputTokens" type="number" min="16" max="4096" step="1" required><small id="tokensHelp">A ceiling for each reply, including tool calls. Not a word count.</small></label>
+            <label class="toggle-field"><span>Expressive face</span><span class="toggle-line"><input type="checkbox" name="expressionTools" role="switch"><span>Let the model change the robot's expression</span></span><small>Happy, sad, angry, sleepy, or neutral.</small></label>
+          </div>
+          <div id="backendSettings" class="backend spaced" hidden>
+            <label>GPT-Live tool backend model<input name="backendModel" maxlength="100" placeholder="gpt-4.1-mini"><small>Separate Responses model for face tools. Billed separately.</small></label>
+            <label class="spaced">Tool backend instructions<textarea name="backendInstructions" maxlength="12000" rows="4" spellcheck="false"></textarea><small>Tool rules belong here; speaking style belongs in the main system prompt.</small></label>
+          </div>
+        </section>
+        <section class="card" id="robot">
+          <div class="section-heading"><div><p class="eyebrow">05 / ROBOT</p><h2>Make yourself at home.</h2></div><span class="tag">Applies instantly</span></div>
+          <p class="help">Volume and brightness apply on the robot right away, without starting a new conversation.</p>
+          <div class="fields two">
+            <label>Speaker volume <output id="volumeValue" for="speakerVolume">86%</output><input type="range" name="speakerVolume" id="speakerVolume" min="0" max="255" step="5"><small>Loud settings can distort on the small speaker.</small></label>
+            <label>Screen brightness <output id="brightnessValue" for="screenBrightness">50%</output><input type="range" name="screenBrightness" id="screenBrightness" min="0" max="255" step="5"><small>At 0% the screen goes dark; the robot keeps working.</small></label>
+          </div>
+          <div class="wifi spaced">
+            <div class="wifi-heading"><h3>Wi-Fi</h3><span id="wifiCurrent" class="tag">Robot offline</span></div>
+            <dl class="wifi-details"><div><dt>Network</dt><dd id="wifiSsid">—</dd></div><div><dt>Signal</dt><dd id="wifiSignal">—</dd></div><div><dt>Robot IP</dt><dd id="wifiIp">—</dd></div></dl>
+            <div class="fields two spaced">
+              <label>New network name<input id="wifiNewSsid" maxlength="32" autocomplete="off" spellcheck="false" placeholder="2.4 GHz network"></label>
+              <label>Password<input id="wifiNewPassword" type="password" maxlength="64" autocomplete="new-password" placeholder="Leave empty for an open network"></label>
+            </div>
+            <div class="wifi-actions"><button type="button" id="wifiSwitchButton" class="button secondary" disabled>Switch network</button><button type="button" id="wifiBuiltinButton" class="button secondary" hidden>Use built-in network</button></div>
+            <div id="wifiNotice" class="notice" hidden></div>
+            <p class="footnote">The robot saves a new network only after it reaches this relay through it, and returns to the previous one within 30 seconds if it can't. Use a 2.4 GHz network on the same LAN as this Mac. The password goes straight to the robot over your local network and isn't stored on this Mac.</p>
+          </div>
+        </section>
+        <div class="savebar"><div><span id="dirtyDot" class="dirty-dot"></span><strong id="saveState">Loading settings…</strong><small>Volume and brightness apply instantly; other changes start a new conversation.</small></div><div class="save-actions"><button type="button" id="discardButton" class="button secondary" disabled>Discard</button><button id="saveButton" class="button primary" type="submit" disabled>Save & apply <span aria-hidden="true">↗</span></button></div></div>
+      </form>
+      <aside class="context-panel" aria-label="Robot session and help">
+        <section class="session-card">
+          <div class="session-top"><span class="eyebrow">ON THE OTHER END</span><span id="apiDot" class="api-dot"></span></div>
+          <div class="robot-screen" aria-hidden="true"><div class="face-eyes"><span></span><span></span></div><div class="face-mouth"></div></div>
+          <h2 id="activityText">Waiting for the robot</h2><p id="activityHelp">Your relay's current session will appear here.</p>
+          <dl class="session-details"><div><dt>Running model</dt><dd id="runningModel">—</dd></div><div><dt>API session</dt><dd id="apiState">—</dd></div><div><dt>Microphone</dt><dd id="micState">—</dd></div><div><dt>Audio queued</dt><dd id="audioQueued">—</dd></div></dl>
+          <button type="button" class="button session-button" id="reconnectButton" disabled>↻ &nbsp; New conversation</button>
+        </section>
+        <section class="card test-card"><p class="eyebrow">HEAR THE DIFFERENCE</p><h3>Try a short phrase.</h3><label for="testPhrase" class="sr-only">Voice test phrase</label><textarea id="testPhrase" maxlength="300" rows="3">こんにちは。声のテストです。</textarea><button type="button" id="testButton" class="button secondary full" disabled>▶ &nbsp; Test voice</button><p class="footnote">Uses the saved settings and normal API usage. GPT-Live may paraphrase.</p></section>
+        <section class="guide"><h3>What's in your control?</h3><dl><div><dt>Personality & language</dt><dd>Use the system prompt for character, tone, language, and answer length.</dd></div><div><dt>Voice & pace</dt><dd>Pick a voice. Realtime also supports a speaking-speed adjustment.</dd></div><div><dt>Latency & token budget</dt><dd>Balance reasoning effort, response limits, and turn detection.</dd></div><div><dt>Robot hardware</dt><dd>Volume, brightness and Wi-Fi are set on the robot. Audio stays 24 kHz mono, turn by turn.</dd></div></dl><details><summary>Why no temperature slider?</summary><p>These Realtime models don't expose temperature. Guide response style with your prompt and supported reasoning settings.</p></details><a href="https://developers.openai.com/api/reference/resources/realtime/client-events" target="_blank" rel="noopener noreferrer">OpenAI parameter reference ↗</a></section>
+      </aside>
+    </div>
+    <footer>STACKCHAN STUDIO <span>Little robot. Lots of personality.</span></footer>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

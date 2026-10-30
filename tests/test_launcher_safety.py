@@ -32,7 +32,7 @@ class LauncherSafety(unittest.TestCase):
                 else:
                     sys.modules[key] = value
 
-    def test_nvs_is_inaccessible_and_wifi_init_is_ram_only(self):
+    def test_nvs_is_limited_to_bot_namespace_and_wifi_init_is_ram_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             tmp = Path(temporary)
             (tmp / "nvs.h").write_text("""
@@ -52,8 +52,20 @@ struct wifi_init_config_t { int before; bool nvs_enable; int after; };
 """)
             (tmp / "test.cpp").write_text(f"""
 #include <cassert>
+#include <cstring>
 #include "{ROOT / 'src/no_nvs.cpp'}"
-static int calls;
+static int calls, opens, mounts;
+extern "C" esp_err_t __real_nvs_flash_init_partition(const char *partition) {{
+    ++mounts;
+    assert(!strcmp(partition, "nvs"));
+    return ESP_OK;
+}}
+extern "C" esp_err_t __real_nvs_open_from_partition(const char *partition, const char *name, nvs_open_mode_t, nvs_handle_t *handle) {{
+    ++opens;
+    assert(!strcmp(partition, "nvs") && !strcmp(name, "rtbot"));
+    *handle = 7;
+    return ESP_OK;
+}}
 extern "C" esp_err_t __real_esp_wifi_init(const wifi_init_config_t *cfg) {{
     ++calls;
     assert(!cfg->nvs_enable && cfg->before == 17 && cfg->after == 42);
@@ -63,9 +75,16 @@ int main() {{
     nvs_handle_t handle = 99;
     assert(__wrap_nvs_flash_init() == ESP_OK);
     assert(__wrap_nvs_flash_init_partition("nvs") == ESP_OK);
+    assert(mounts == 0);
     assert(__wrap_nvs_open("M5GFX", 1, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
+    assert(__wrap_nvs_open(nullptr, 1, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
     assert(__wrap_nvs_open_from_partition("muse_nvs", "wifi", 1, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
-    assert(handle == 99);
+    assert(__wrap_nvs_open_from_partition("muse_nvs", "rtbot", 1, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
+    assert(__wrap_nvs_open_from_partition("nvs", "rtbot2", 1, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
+    assert(handle == 99 && opens == 0);
+    assert(__wrap_nvs_open("rtbot", 1, &handle) == ESP_OK && handle == 7 && opens == 1);
+    assert(__wrap_nvs_open_from_partition("nvs", "rtbot", 1, &handle) == ESP_OK && opens == 2);
+    assert(bot_storage_init() == ESP_OK && mounts == 1);
     assert(__wrap_nvs_flash_erase() == ESP_ERR_NOT_SUPPORTED);
     assert(__wrap_nvs_flash_erase_partition("nvs") == ESP_ERR_NOT_SUPPORTED);
     wifi_init_config_t cfg = {{17, true, 42}};

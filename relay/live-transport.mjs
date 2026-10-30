@@ -38,13 +38,13 @@ export class LiveTransport extends EventEmitter {
     if (event.type === 'session.update') {
       const session = {
         model: this.config.model,
-        instructions: `${this.config.instructions} A backend can change your face expression. Delegate those changes to it.`,
+        instructions: this.config.instructions + (this.config.expressionTools === false ? '' : ' A backend can change your face expression. Delegate those changes to it.'),
         audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: this.config.voice } },
         delegation: {
           type: 'responses',
           responses: {
             model: this.config.backendModel || 'gpt-4.1-mini',
-            instructions: 'Control the robot face using set_expression when its mood should change. You cannot move the robot or control other devices. Return a brief factual result.',
+            instructions: this.config.backendInstructions ?? 'Control the robot face using set_expression when its mood should change. You cannot move the robot or control other devices. Return a brief factual result.',
             max_output_tokens: 256,
             parallel_tool_calls: false,
             tools: event.session.tools.map(tool => ({ ...tool, strict: true })),

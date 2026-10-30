@@ -3,6 +3,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { LiveTransport } from './live-transport.mjs';
+import { DEVICE_KEYS, capabilities, loadSettings, publicSettings, saveSettings, validateWifi, withSettings } from './settings.mjs';
+import { dashboardHandler } from './dashboard.mjs';
 
 export const CHUNK = 1024;
 export const WINDOW = 8192;
@@ -38,7 +40,7 @@ export function readConfig(env = process.env) {
   const port = Number(env.PORT || 8080);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Invalid PORT');
   return {
-    host: env.HOST || '127.0.0.1', port, token, url: url.href, headers, model, protocol,
+    host: env.HOST || '127.0.0.1', port, token, url: url.href, headers, model, protocol, provider,
     backendModel: env.LIVE_BACKEND_MODEL || 'gpt-4.1-mini', greeting: env.BOT_GREETING || '',
     voice: env.REALTIME_VOICE || 'marin',
     instructions: env.BOT_INSTRUCTIONS || 'You are StackChan, a friendly small robot. Speak briefly in Japanese. Show your mood through your face when appropriate. Your voice is AI generated.',
@@ -46,22 +48,27 @@ export function readConfig(env = process.env) {
 }
 
 export function sessionUpdate(config) {
-  return {
+  const settings = publicSettings(config);
+  const result = {
     type: 'session.update',
     session: {
       type: 'realtime',
       output_modalities: ['audio'],
       instructions: config.instructions,
-      max_output_tokens: 512,
+      max_output_tokens: settings.maxOutputTokens,
       audio: {
         input: {
           format: { type: 'audio/pcm', rate: 24000 },
-          turn_detection: {
-            type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300,
-            silence_duration_ms: 500, create_response: true, interrupt_response: false,
+          noise_reduction: settings.noiseReduction === 'off' ? null : { type: settings.noiseReduction },
+          turn_detection: settings.turnDetection === 'semantic_vad' ? {
+            type: 'semantic_vad', eagerness: settings.eagerness,
+            create_response: true, interrupt_response: false,
+          } : {
+            type: 'server_vad', threshold: settings.vadThreshold, prefix_padding_ms: settings.prefixPaddingMs,
+            silence_duration_ms: settings.silenceDurationMs, create_response: true, interrupt_response: false,
           },
         },
-        output: { format: { type: 'audio/pcm', rate: 24000 }, voice: config.voice },
+        output: { format: { type: 'audio/pcm', rate: 24000 }, voice: config.voice, speed: settings.speed },
       },
       tools: [{
         type: 'function', name: 'set_expression',
@@ -72,10 +79,17 @@ export function sessionUpdate(config) {
           required: ['expression'],
         },
       }],
-      tool_choice: 'auto',
+      tool_choice: settings.expressionTools ? 'auto' : 'none',
     },
   };
+  if (!settings.expressionTools) result.session.tools = [];
+  if (capabilities(settings.model).reasoning && settings.reasoningEffort !== 'default') {
+    result.session.reasoning = { effort: settings.reasoningEffort };
+  }
+  return result;
 }
+
+const text32 = value => typeof value === 'string' ? value.slice(0, 32) : null;
 
 function authorized(header, token) {
   const expected = Buffer.from(`Bearer ${token}`);
@@ -84,12 +98,53 @@ function authorized(header, token) {
 }
 
 export function createRelay(config, log = console) {
-  const http = createServer((req, res) => {
+  let active, controls;
+  let state = { deviceConnected: false, apiReady: false, activity: 'offline', micFrames: 0,
+    playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
+  let lastError = null, deviceInfo = null, wifiChange = null;
+  const startedAt = Date.now();
+  const deviceConfig = () => ({ type: 'device_config', volume: config.speakerVolume ?? 220, brightness: config.screenBrightness ?? 127 });
+  const dashboard = dashboardHandler({
+    config: () => config,
+    status: () => ({ ...state,
+      activity: state.activity === 'listening' && Date.now() - state.lastMicAt > 1500 ? 'idle' : state.activity,
+      lastError, device: deviceInfo, wifi: wifiChange, model: config.model || 'gpt-realtime-2.1-mini',
+      protocol: config.protocol || 'realtime', uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }),
+    save: async update => {
+      const next = withSettings(config, update);
+      await saveSettings(next, config.settingsFile);
+      const before = publicSettings(config), after = publicSettings(next);
+      const deviceOnly = Object.keys(after).every(key => DEVICE_KEYS.includes(key) || after[key] === before[key]);
+      config = next;
+      // Volume and brightness apply on the robot immediately; anything else needs a new session.
+      if (deviceOnly) controls?.configure();
+      else if (active) active.close(1000, 'Settings updated');
+      return { config, restarted: !deviceOnly && !!active };
+    },
+    wifi: value => {
+      const request = validateWifi(value);
+      if (!controls) { const error = Error('Connect the robot before changing its Wi-Fi.'); error.status = 409; throw error; }
+      if (wifiChange?.state === 'trying' && Date.now() - wifiChange.startedAt < 90000) {
+        const error = Error('A Wi-Fi change is already in progress.'); error.status = 409; throw error;
+      }
+      // The password goes only to the robot; it is never stored or logged here.
+      wifiChange = { state: 'trying', ssid: request.builtin ? null : request.ssid, builtin: !!request.builtin, startedAt: Date.now() };
+      controls.wifi(request);
+    },
+    test: text => {
+      if (!controls || !state.apiReady || state.activity === 'speaking' || state.activity === 'thinking') {
+        const error = Error('Wait for the robot and API to be ready, with no reply playing.'); error.status = 409; throw error;
+      }
+      controls.test(text);
+    },
+    reconnect: () => { if (active) active.close(1000, 'New conversation'); },
+  });
+  const http = createServer(async (req, res) => {
+    if (await dashboard(req, res)) return;
     res.writeHead(req.url === '/healthz' ? 200 : 404, { 'Content-Type': 'text/plain' });
     res.end(req.url === '/healthz' ? 'ok\n' : 'not found\n');
   });
   const devices = new WebSocketServer({ noServer: true, maxPayload: 2048, perMessageDeflate: false });
-  let active;
   http.on('upgrade', (req, socket, head) => {
     if (req.url !== '/device' || !authorized(req.headers.authorization, config.token)) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
@@ -100,6 +155,10 @@ export function createRelay(config, log = console) {
 
   devices.on('connection', device => {
     active = device;
+    state = { deviceConnected: true, apiReady: false, activity: 'connecting', micFrames: 0,
+      playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
+    const session = state;
+    device.send(JSON.stringify(deviceConfig()));
     const options = {
       headers: config.headers, maxPayload: 2 * 1024 * 1024,
       perMessageDeflate: false, handshakeTimeout: 10000,
@@ -118,8 +177,15 @@ export function createRelay(config, log = console) {
     };
     const toDevice = obj => json(device, obj);
     const toCloud = obj => json(upstream, obj);
+    controls = { test: text => toCloud({ type: 'response.create', response: {
+      instructions: `Read aloud this test phrase, without taking any actions: ${text}`,
+      tool_choice: 'none', max_output_tokens: 128,
+    } }),
+    configure: () => toDevice(deviceConfig()),
+    wifi: request => toDevice({ type: 'wifi_set', ...request }) };
     const fail = code => {
       if (closed) return;
+      lastError = { code, at: new Date().toISOString() };
       log.error(`Realtime session stopped: ${code}`);
       toDevice({ type: 'error', code });
       cleanup();
@@ -128,6 +194,7 @@ export function createRelay(config, log = console) {
     function cleanup() {
       if (closed) return;
       closed = true;
+      session.apiReady = false;
       clearInterval(heartbeat);
       clearTimeout(setupTimeout);
       queue.length = sentSizes.length = 0;
@@ -147,6 +214,7 @@ export function createRelay(config, log = console) {
         endSent = true;
         toDevice({ type: 'audio_end' });
       }
+      session.queuedAudioMs = Math.round((queuedBytes + inFlight) / 48);
     }
     const setupTimeout = setTimeout(() => fail('session_setup_timeout'), 15000);
     const heartbeat = setInterval(() => {
@@ -162,13 +230,17 @@ export function createRelay(config, log = console) {
     upstream.on('error', () => fail('upstream_connection'));
     upstream.on('close', () => { if (!closed) fail('upstream_closed'); });
     device.on('error', () => { cleanup(); device.terminate(); });
-    device.on('close', () => { cleanup(); if (active === device) active = undefined; });
+    device.on('close', () => {
+      cleanup(); session.deviceConnected = false; session.activity = 'offline';
+      if (active === device) { active = undefined; controls = undefined; }
+    });
 
     device.on('message', (data, binary) => {
       if (closed) return;
       if (binary) {
         if (data.length !== CHUNK) return fail('invalid_microphone_chunk');
         if (ready && !busy) {
+          ++session.micFrames; session.lastMicAt = Date.now(); session.activity = 'listening';
           if (upstream.bufferedAmount > 64 * 1024) return fail('upstream_backpressure');
           toCloud({ type: 'input_audio_buffer.append', audio: data.toString('base64') });
         }
@@ -177,14 +249,30 @@ export function createRelay(config, log = console) {
       let message;
       try { message = JSON.parse(data.toString()); } catch { return fail('invalid_device_json'); }
       if (message?.type === 'hello') return;
+      if (message?.type === 'device_status') {
+        const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : null;
+        const integer = value => Number.isInteger(value) ? value : null;
+        deviceInfo = { ssid: text(message.ssid, 32), ip: text(message.ip, 45), rssi: integer(message.rssi),
+          savedNetwork: message.savedNetwork === true, storage: message.storage === true,
+          volume: integer(message.volume), brightness: integer(message.brightness), at: Date.now() };
+        return;
+      }
+      if (message?.type === 'wifi_result') {
+        const result = ['saved', 'forgotten', 'connected_not_saved', 'reverted', 'saved_unavailable', 'storage_unavailable']
+          .includes(message.result) ? message.result : 'unknown';
+        wifiChange = { ...wifiChange, state: result, ssid: text32(message.ssid), finishedAt: Date.now() };
+        return;
+      }
       if (message?.type === 'played') {
         if (!sentSizes.length || message.bytes !== sentSizes[0]) return fail('invalid_playback_ack');
         inFlight -= sentSizes.shift();
+        session.playedAudioBytes += message.bytes;
         lastProgress = Date.now();
         pump();
       } else if (message?.type === 'drained') {
         if (!endSent || queuedBytes || inFlight) return fail('invalid_drain');
         started = ending = endSent = busy = false;
+        session.activity = 'idle';
         toCloud({ type: 'input_audio_buffer.clear' });
       } else fail('unknown_device_event');
     });
@@ -201,12 +289,14 @@ export function createRelay(config, log = console) {
       if (event.type === 'session.updated' && !ready) {
         clearTimeout(setupTimeout);
         ready = true;
+        session.apiReady = true; session.activity = 'idle'; lastError = null;
         toDevice({ type: 'ready' });
       } else if (event.type === 'error') {
         // Log codes only: never dump request headers, keys, or conversation audio.
         fail(`api_${String(event.error?.code || 'error').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 80)}`);
       } else if (event.type === 'response.created') {
         busy = true;
+        session.activity = 'thinking';
       } else if (event.type === 'response.output_audio.delta') {
         if (!ready || ending || typeof event.delta !== 'string' ||
             !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(event.delta)) {
@@ -218,6 +308,7 @@ export function createRelay(config, log = console) {
         busy = true;
         if (!started) {
           started = true;
+          session.activity = 'speaking';
           toDevice({ type: 'audio_start' });
         }
         for (let i = 0; i < pcm.length; i += CHUNK) {
@@ -244,7 +335,7 @@ export function createRelay(config, log = console) {
         }
         if (calls.length) toCloud({ type: 'response.create' });
         else if (started) { ending = true; pump(); }
-        else busy = false;
+        else { busy = false; session.activity = 'idle'; }
       }
     });
   });
@@ -267,7 +358,7 @@ export function createRelay(config, log = console) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const config = readConfig();
+    const config = await loadSettings(readConfig());
     const relay = createRelay(config);
     await relay.listen();
     console.log(`StackChan relay listening on ${config.host}:${config.port}`);

@@ -107,6 +107,46 @@ dated preview endpoint/schema is not used. `REALTIME_VOICE` and
 npm start
 ```
 
+## Web dashboard
+
+Open **http://localhost:8080** on the relay computer for StackChan Studio.
+The dashboard is served by the same Node process; it needs no separate build.
+Its pages and management API are restricted to loopback requests. The robot's
+authenticated LAN WebSocket remains available on the same port.
+
+You can edit the system prompt, voice model, built-in voice, response token
+limit, supported reasoning effort, speaking speed, silence or semantic turn
+detection, microphone noise reduction, and face-expression tool access.
+GPT-Live additionally exposes its tool backend model and prompt; incompatible
+Realtime controls are disabled for that model. The page explains the fixed
+audio format, half-duplex hardware, and unsupported temperature control.
+
+**Save & apply** persists settings in the ignored, private `relay/settings.json`
+file and starts a new conversation. The robot reconnects automatically. These
+saved settings override corresponding `.env` preferences on relay startup;
+credentials remain exclusively in `.env`. Discard reverts unsaved form edits.
+
+**Test voice** uses the saved settings and is enabled only when the robot and
+API are ready and no reply is playing. **New conversation** reconnects without
+changing preferences. The status panel shows actual connection state and queued
+audio. A microphone marked idle may be muted on the robot; tap its screen to
+unmute.
+
+The **Robot** section sets speaker volume and screen brightness; these apply
+immediately without a new conversation and are re-sent whenever the robot
+connects. It also shows the robot's Wi-Fi network and can switch it. The robot
+saves a new network (in its own `rtbot` NVS namespace; all other NVS stays
+inaccessible) only after reaching the relay through it, and reverts to the
+previous network after 30 seconds otherwise. At boot it falls back to the
+built-in `bot_config.h` network if the saved one is unavailable. Wi-Fi
+passwords are sent only to the robot and are never stored by the relay.
+
+The dashboard does not expose API keys or device tokens. Foreign origins and
+non-local Host headers are rejected; keep the management page local rather
+than publishing it through an unauthenticated proxy.
+
+## Session behavior
+
 The bot shows `Listening` only after the API confirms the session configuration.
 `/healthz` checks relay process health, not API credentials or model access.
 API failures are logged as codes without conversation audio or keys.

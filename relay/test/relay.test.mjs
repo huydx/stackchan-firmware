@@ -34,15 +34,16 @@ async function fixture(t) {
     for (const client of cloud.clients) client.terminate();
     await new Promise(resolve => cloud.close(resolve));
   });
-  const cloudConnected = once(cloud, 'connection');
+  // Attach the cloud inbox synchronously so the relay's session.update cannot race past it.
+  const cloudConnected = new Promise(resolve => cloud.once('connection', ws => resolve([ws, inbox(ws)])));
   const device = new WebSocket(`ws://127.0.0.1:${relay.http.address().port}/device`, {
     headers: { Authorization: `Bearer ${'x'.repeat(32)}` },
   });
   const received = inbox(device);
   await once(device, 'open');
-  const [upstream] = await cloudConnected;
-  const sent = inbox(upstream);
+  const [upstream, sent] = await cloudConnected;
   const setup = await sent.next();
+  assert.deepEqual(await received.next(), { type: 'device_config', volume: 220, brightness: 127 });
   return { relay, cloud, device, received, upstream, sent, setup, errors };
 }
 

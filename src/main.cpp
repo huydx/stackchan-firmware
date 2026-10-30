@@ -3,6 +3,7 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <atomic>
+#include <nvs.h>
 #include "playback_pool.h"
 #if __has_include("bot_config.h")
 #include "bot_config.h"
@@ -35,6 +36,18 @@ static String status = "Joining Wi-Fi";
 static String authHeader;
 static uint32_t nextDraw = 0, resumeAt = 0, speakerStopAt = 0;
 static float mouth = 0;
+static uint8_t speakerVolume = BOT_SPEAKER_VOLUME;
+
+// A new network is kept only after it reaches the relay (or, at boot, joins
+// Wi-Fi) within 30 s; otherwise the previous network is restored.
+extern "C" esp_err_t bot_storage_init();
+enum class Trial : uint8_t { None, Boot, Change, Forget };
+static Trial trial = Trial::None, requested = Trial::None;
+static String wifiSsid = BOT_WIFI_SSID, wifiPassword = BOT_WIFI_PASSWORD;
+static String previousSsid, previousPassword, requestedSsid, requestedPassword;
+static bool storageReady = false, usingSaved = false, previousSaved = false, relayConnected = false;
+static uint32_t trialUntil = 0, nextDeviceStatus = 0;
+static const char *wifiResult = nullptr;
 
 static void captureTask(void *) {
     MicFrame frame;
@@ -75,6 +88,56 @@ static void sendControl(const char *type, size_t bytes = 0) {
     socket.sendTXT(text);
 }
 
+static bool loadSavedWifi(String &ssid, String &password) {
+    nvs_handle_t handle;
+    if (!storageReady || nvs_open("rtbot", NVS_READONLY, &handle) != ESP_OK) return false;
+    char savedSsid[33], savedPassword[65];
+    size_t ssidLength = sizeof savedSsid, passwordLength = sizeof savedPassword;
+    const bool found = nvs_get_str(handle, "ssid", savedSsid, &ssidLength) == ESP_OK &&
+                       nvs_get_str(handle, "pass", savedPassword, &passwordLength) == ESP_OK;
+    nvs_close(handle);
+    if (found) { ssid = savedSsid; password = savedPassword; }
+    return found;
+}
+
+// Saves the current network, or forgets the saved one when forget is true.
+static bool storeWifi(bool forget) {
+    nvs_handle_t handle;
+    if (!storageReady || nvs_open("rtbot", NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t error = forget ? nvs_erase_all(handle) : nvs_set_str(handle, "ssid", wifiSsid.c_str());
+    if (!forget && error == ESP_OK) error = nvs_set_str(handle, "pass", wifiPassword.c_str());
+    if (error == ESP_OK) error = nvs_commit(handle);
+    nvs_close(handle);
+    return error == ESP_OK;
+}
+
+static void sendDeviceStatus() {
+    JsonDocument doc;
+    doc["type"] = "device_status";
+    doc["ssid"] = WiFi.SSID();
+    doc["ip"] = WiFi.localIP().toString();
+    doc["rssi"] = WiFi.RSSI();
+    doc["savedNetwork"] = usingSaved;
+    doc["storage"] = storageReady;
+    doc["volume"] = speakerVolume;
+    doc["brightness"] = M5.Display.getBrightness();
+    String text;
+    serializeJson(doc, text);
+    socket.sendTXT(text);
+}
+
+static void sendWifiResult() {
+    if (!wifiResult || !relayConnected) return;
+    JsonDocument doc;
+    doc["type"] = "wifi_result";
+    doc["result"] = wifiResult;
+    doc["ssid"] = wifiSsid;
+    String text;
+    serializeJson(doc, text);
+    socket.sendTXT(text);
+    wifiResult = nullptr;
+}
+
 static void stopAudio() {
     // Speaker.end() uninstalls the shared I2S driver even when it is idle.
     // Stop the mic task first, and only tear down an active speaker.
@@ -102,13 +165,17 @@ static void fail(const char *message) {
 
 static void onSocket(WStype_t type, uint8_t *data, size_t length) {
     if (type == WStype_DISCONNECTED) {
+        relayConnected = false;
         ready = false;
         stopAudio();
         if (!fault) status = "Relay disconnected";
     } else if (type == WStype_CONNECTED) {
         fault = false;
+        relayConnected = true;
         status = "Connecting to AI";
         sendControl("hello");
+        nextDeviceStatus = 0;
+        if (trial == Trial::None) sendWifiResult();
     } else if (type == WStype_BIN) {
         if (!ready || !output || !length || length > CHUNK || length % 2 ||
             length > CAPACITY - available || packetCount == 16) {
@@ -138,7 +205,7 @@ static void onSocket(WStype_t type, uint8_t *data, size_t length) {
             stopMic();
             if (!output) {
                 if (!M5.Speaker.begin()) { fail("Speaker failed"); return; }
-                M5.Speaker.setVolume(BOT_SPEAKER_VOLUME);
+                M5.Speaker.setVolume(speakerVolume);
             }
             output = true;
             outputDone = false;
@@ -152,9 +219,79 @@ static void onSocket(WStype_t type, uint8_t *data, size_t length) {
             speakerStopAt = millis() + 120;
         } else if (!strcmp(event, "expression")) {
             expression = doc["value"] | "neutral";
+        } else if (!strcmp(event, "device_config")) {
+            if (doc["volume"].is<int>()) {
+                speakerVolume = constrain(doc["volume"].as<int>(), 0, 255);
+                if (output) M5.Speaker.setVolume(speakerVolume);
+            }
+            if (doc["brightness"].is<int>()) M5.Display.setBrightness(constrain(doc["brightness"].as<int>(), 0, 255));
+            nextDeviceStatus = 0;
+        } else if (!strcmp(event, "wifi_set") && trial == Trial::None && requested == Trial::None) {
+            // Switch networks from loop(), not from inside the socket callback.
+            const char *ssid = doc["ssid"] | "";
+            const char *password = doc["password"] | "";
+            if (doc["builtin"] | false) {
+                requestedSsid = BOT_WIFI_SSID;
+                requestedPassword = BOT_WIFI_PASSWORD;
+                requested = Trial::Forget;
+            } else if (*ssid && strlen(ssid) <= 32 && strlen(password) <= 64) {
+                requestedSsid = ssid;
+                requestedPassword = password;
+                requested = Trial::Change;
+            }
         } else if (!strcmp(event, "error")) {
             fail("Relay/API error; see relay");
         }
+    }
+}
+
+static void startTrial(Trial kind, const String &ssid, const String &password) {
+    previousSsid = wifiSsid;
+    previousPassword = wifiPassword;
+    previousSaved = usingSaved;
+    wifiSsid = ssid;
+    wifiPassword = password;
+    trial = kind;
+    trialUntil = millis() + 30000;
+    ready = false;
+    stopAudio();
+    socket.disconnect();
+    relayConnected = false;
+    status = "Trying Wi-Fi";
+    WiFi.disconnect();
+    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
+}
+
+static void updateTrial() {
+    if (requested != Trial::None) {
+        startTrial(requested, requestedSsid, requestedPassword);
+        requested = Trial::None;
+        requestedPassword = "";
+    }
+    if (trial == Trial::None) return;
+    const bool reached = trial == Trial::Boot ? WiFi.status() == WL_CONNECTED : relayConnected;
+    if (reached) {
+        if (trial == Trial::Change) {
+            usingSaved = storeWifi(false);
+            wifiResult = !storageReady ? "storage_unavailable" : usingSaved ? "saved" : "connected_not_saved";
+        } else if (trial == Trial::Forget) {
+            wifiResult = storeWifi(true) ? "forgotten" : "storage_unavailable";
+            usingSaved = false;
+        }
+        trial = Trial::None;
+        previousPassword = "";
+        sendWifiResult();
+    } else if (int32_t(millis() - trialUntil) >= 0) {
+        wifiResult = trial == Trial::Boot ? "saved_unavailable" : "reverted";
+        wifiSsid = previousSsid;
+        wifiPassword = previousPassword;
+        usingSaved = previousSaved;
+        previousPassword = "";
+        trial = Trial::None;
+        status = "Back to previous Wi-Fi";
+        socket.disconnect();
+        WiFi.disconnect();
+        WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
     }
 }
 
@@ -226,7 +363,19 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);
-    WiFi.begin(BOT_WIFI_SSID, BOT_WIFI_PASSWORD);
+    storageReady = bot_storage_init() == ESP_OK;
+    String savedSsid, savedPassword;
+    if (loadSavedWifi(savedSsid, savedPassword)) {
+        // Fall back to the built-in network if the saved one is unavailable.
+        previousSsid = wifiSsid;
+        previousPassword = wifiPassword;
+        wifiSsid = savedSsid;
+        wifiPassword = savedPassword;
+        usingSaved = true;
+        trial = Trial::Boot;
+        trialUntil = millis() + 30000;
+    }
+    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
     authHeader = String("Authorization: Bearer ") + BOT_RELAY_TOKEN;
     socket.setExtraHeaders(authHeader.c_str());
     socket.onEvent(onSocket);
@@ -244,6 +393,7 @@ void loop() {
             if (ready) status = muted ? "Muted" : "Listening";
         }
     }
+    updateTrial();
     if (WiFi.status() == WL_CONNECTED) socket.loop();
     else if (ready) {
         ready = false;
@@ -313,6 +463,10 @@ void loop() {
         while (ready && xQueueReceive(micQueue, &frame, 0) == pdTRUE) {
             socket.sendBIN(reinterpret_cast<uint8_t *>(frame.samples), CHUNK);
         }
+    }
+    if (relayConnected && int32_t(millis() - nextDeviceStatus) >= 0) {
+        sendDeviceStatus();
+        nextDeviceStatus = millis() + 5000;
     }
     if (int32_t(millis() - nextDraw) >= 0) {
         drawFace();

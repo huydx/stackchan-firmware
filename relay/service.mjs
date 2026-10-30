@@ -2,6 +2,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { createRelay, readConfig } from './server.mjs';
+import { loadSettings } from './settings.mjs';
 
 let relay, lastVersion, lastMessage, updating = false;
 const report = message => {
@@ -17,7 +18,7 @@ async function refresh() {
     if (mtimeMs === lastVersion) return;
     const env = parseEnv(await readFile(file, 'utf8'));
     let config;
-    try { config = readConfig(env); }
+    try { config = await loadSettings(readConfig(env)); }
     catch {
       report('Waiting for a complete API configuration in the private relay .env file.');
       return;
