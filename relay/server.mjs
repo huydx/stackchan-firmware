@@ -103,7 +103,11 @@ export function createRelay(config, log = console, { fetch } = {}) {
     playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
   let lastError = null, deviceInfo = null, wifiChange = null;
   const startedAt = Date.now();
-  const deviceConfig = () => ({ type: 'device_config', volume: config.speakerVolume ?? 220, brightness: config.screenBrightness ?? 127 });
+  const deviceConfig = () => {
+    const settings = publicSettings(config);
+    return { type: 'device_config', volume: settings.speakerVolume, brightness: settings.screenBrightness,
+      nod: settings.headNod, nodAngle: settings.nodAngle, nodPeriod: settings.nodPeriodMs };
+  };
   const dashboard = dashboardHandler({
     config: () => config,
     status: () => ({ ...state,

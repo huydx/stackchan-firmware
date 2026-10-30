@@ -89,10 +89,15 @@
         </section>
         <section class="card" id="robot">
           <div class="section-heading"><div><p class="eyebrow">05 / ROBOT</p><h2>Make yourself at home.</h2></div><span class="tag">Applies instantly</span></div>
-          <p class="help">Volume and brightness apply on the robot right away, without starting a new conversation.</p>
+          <p class="help">Volume, brightness and head movement apply on the robot right away, without starting a new conversation.</p>
           <div class="fields two">
             <label>Speaker volume <output id="volumeValue" for="speakerVolume">86%</output><input type="range" name="speakerVolume" id="speakerVolume" min="0" max="255" step="5"><small>Loud settings can distort on the small speaker.</small></label>
             <label>Screen brightness <output id="brightnessValue" for="screenBrightness">50%</output><input type="range" name="screenBrightness" id="screenBrightness" min="0" max="255" step="5"><small>At 0% the screen goes dark; the robot keeps working.</small></label>
+          </div>
+          <div class="fields three spaced">
+            <label class="toggle-field"><span>Head movement</span><span class="toggle-line"><input type="checkbox" name="headNod" id="headNod" role="switch"><span>Nod while speaking</span></span><small>The head rests and relaxes when quiet.</small></label>
+            <label>Nod angle <output id="nodAngleValue" for="nodAngle">6°</output><input type="range" name="nodAngle" id="nodAngle" min="2" max="20" step="1"><small>How far the head tips up.</small></label>
+            <label>Nod speed <output id="nodPeriodValue" for="nodPeriodMs">2.4 s</output><input type="range" name="nodPeriodMs" id="nodPeriodMs" min="1000" max="5000" step="200"><small>Seconds per nod; longer is slower.</small></label>
           </div>
           <div class="wifi spaced">
             <div class="wifi-heading"><h3>Wi-Fi</h3><span id="wifiCurrent" class="tag">Robot offline</span></div>
@@ -106,7 +111,7 @@
             <p class="footnote">The robot saves a new network only after it reaches this relay through it, and returns to the previous one within 30 seconds if it can't. Use a 2.4 GHz network on the same LAN as this Mac. The password goes straight to the robot over your local network and isn't stored on this Mac.</p>
           </div>
         </section>
-        <div class="savebar"><div><span id="dirtyDot" class="dirty-dot"></span><strong id="saveState">Loading settings…</strong><small>Volume and brightness apply instantly; other changes start a new conversation.</small></div><div class="save-actions"><button type="button" id="discardButton" class="button secondary" disabled>Discard</button><button id="saveButton" class="button primary" type="submit" disabled>Save & apply <span aria-hidden="true">↗</span></button></div></div>
+        <div class="savebar"><div><span id="dirtyDot" class="dirty-dot"></span><strong id="saveState">Loading settings…</strong><small>Robot settings apply instantly; other changes start a new conversation.</small></div><div class="save-actions"><button type="button" id="discardButton" class="button secondary" disabled>Discard</button><button id="saveButton" class="button primary" type="submit" disabled>Save & apply <span aria-hidden="true">↗</span></button></div></div>
       </form>
       <aside class="context-panel" aria-label="Robot session and help">
         <section class="session-card">

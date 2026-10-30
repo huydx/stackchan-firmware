@@ -43,7 +43,7 @@ async function fixture(t) {
   await once(device, 'open');
   const [upstream, sent] = await cloudConnected;
   const setup = await sent.next();
-  assert.deepEqual(await received.next(), { type: 'device_config', volume: 220, brightness: 127 });
+  assert.deepEqual(await received.next(), { type: 'device_config', volume: 220, brightness: 127, nod: true, nodAngle: 6, nodPeriod: 2400 });
   return { relay, cloud, device, received, upstream, sent, setup, errors };
 }
 

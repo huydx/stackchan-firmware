@@ -39,6 +39,8 @@ class LauncherSafety(unittest.TestCase):
 #pragma once
 typedef int esp_err_t;
 typedef int nvs_open_mode_t;
+#define NVS_READONLY 0
+#define NVS_READWRITE 1
 typedef unsigned nvs_handle_t;
 #define ESP_OK 0
 #define ESP_ERR_NOT_SUPPORTED 1
@@ -62,7 +64,7 @@ extern "C" esp_err_t __real_nvs_flash_init_partition(const char *partition) {{
 }}
 extern "C" esp_err_t __real_nvs_open_from_partition(const char *partition, const char *name, nvs_open_mode_t, nvs_handle_t *handle) {{
     ++opens;
-    assert(!strcmp(partition, "nvs") && !strcmp(name, "rtbot"));
+    assert(!strcmp(partition, "nvs") && (!strcmp(name, "rtbot") || !strcmp(name, "servo")));
     *handle = 7;
     return ESP_OK;
 }}
@@ -84,6 +86,10 @@ int main() {{
     assert(handle == 99 && opens == 0);
     assert(__wrap_nvs_open("rtbot", 1, &handle) == ESP_OK && handle == 7 && opens == 1);
     assert(__wrap_nvs_open_from_partition("nvs", "rtbot", 1, &handle) == ESP_OK && opens == 2);
+    // The StackChan app's servo calibration is readable but never writable.
+    assert(__wrap_nvs_open("servo", NVS_READWRITE, &handle) == ESP_ERR_NVS_NOT_INITIALIZED && opens == 2);
+    assert(__wrap_nvs_open_from_partition("muse_nvs", "servo", NVS_READONLY, &handle) == ESP_ERR_NVS_NOT_INITIALIZED);
+    assert(__wrap_nvs_open("servo", NVS_READONLY, &handle) == ESP_OK && opens == 3);
     assert(bot_storage_init() == ESP_OK && mounts == 1);
     assert(__wrap_nvs_flash_erase() == ESP_ERR_NOT_SUPPORTED);
     assert(__wrap_nvs_flash_erase_partition("nvs") == ESP_ERR_NOT_SUPPORTED);

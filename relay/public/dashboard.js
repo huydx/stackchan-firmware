@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 const form = $('settingsForm');
 let saved, models = [], selectedCaps, provider, busy = false, latestStatus;
 let toastTimer, polling = false;
-const numeric = new Set(['speed', 'maxOutputTokens', 'vadThreshold', 'prefixPaddingMs', 'silenceDurationMs', 'speakerVolume', 'screenBrightness']);
+const numeric = new Set(['speed', 'maxOutputTokens', 'vadThreshold', 'prefixPaddingMs', 'silenceDurationMs', 'speakerVolume', 'screenBrightness', 'nodAngle', 'nodPeriodMs']);
 const percent = value => `${Math.round(Number(value) / 255 * 100)}%`;
 
 async function api(path, options = {}) {
@@ -36,6 +36,9 @@ function updateDirty() {
   $('thresholdValue').textContent = Number(form.elements.vadThreshold.value).toFixed(2);
   $('volumeValue').textContent = percent(form.elements.speakerVolume.value);
   $('brightnessValue').textContent = percent(form.elements.screenBrightness.value);
+  $('nodAngleValue').textContent = `${form.elements.nodAngle.value}°`;
+  $('nodPeriodValue').textContent = `${(Number(form.elements.nodPeriodMs.value) / 1000).toFixed(1)} s`;
+  $('nodAngle').disabled = $('nodPeriodMs').disabled = !$('headNod').checked;
 }
 function updateCapabilities() {
   const model = $('model').value;

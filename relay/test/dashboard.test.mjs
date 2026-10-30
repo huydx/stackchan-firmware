@@ -113,7 +113,7 @@ test('applying settings closes the old device session after persistence', async 
   const received = [];
   device.on('message', raw => received.push(JSON.parse(raw)));
   await waitFor(() => received.some(message => message.type === 'ready'));
-  assert.deepEqual(received[0], { type: 'device_config', volume: 220, brightness: 127 });
+  assert.deepEqual(received[0], { type: 'device_config', volume: 220, brightness: 127, nod: true, nodAngle: 6, nodPeriod: 2400 });
   assert.equal((await (await fetch(`${f.url}/api/admin/status`)).json()).apiReady, true);
   const closed = once(device, 'close');
   assert.equal((await f.put({ instructions: 'New conversation instructions.' })).status, 200);
@@ -157,14 +157,15 @@ test('volume and brightness apply live without restarting the conversation', asy
   const { device, received } = await connectReadyDevice(f);
   let closed = false;
   device.on('close', () => { closed = true; });
-  const response = await f.put({ speakerVolume: 150, screenBrightness: 40 });
+  const response = await f.put({ speakerVolume: 150, screenBrightness: 40, headNod: false, nodAngle: 10, nodPeriodMs: 3000 });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).restarted, false);
   await waitFor(() => received.some(message => message.type === 'device_config' && message.volume === 150));
-  assert.deepEqual(received.at(-1), { type: 'device_config', volume: 150, brightness: 40 });
+  assert.deepEqual(received.at(-1), { type: 'device_config', volume: 150, brightness: 40, nod: false, nodAngle: 10, nodPeriod: 3000 });
   assert.equal(closed, false);
   assert.equal(JSON.parse(await readFile(f.file, 'utf8')).screenBrightness, 40);
-  for (const value of [{ speakerVolume: 256 }, { screenBrightness: -1 }, { speakerVolume: 1.5 }]) {
+  for (const value of [{ speakerVolume: 256 }, { screenBrightness: -1 }, { speakerVolume: 1.5 },
+    { nodAngle: 45 }, { nodAngle: 1 }, { nodPeriodMs: 200 }, { headNod: 'yes' }]) {
     assert.equal((await f.put(value)).status, 400);
   }
   device.close();

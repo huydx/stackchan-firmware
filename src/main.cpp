@@ -6,6 +6,7 @@
 #include <nvs.h>
 #include "playback_pool.h"
 #include "body_lights.h"
+#include "head_nod.h"
 #if __has_include("bot_config.h")
 #include "bot_config.h"
 #else
@@ -38,6 +39,10 @@ static String authHeader;
 static uint32_t nextDraw = 0, resumeAt = 0, speakerStopAt = 0;
 static float mouth = 0;
 static uint8_t speakerVolume = BOT_SPEAKER_VOLUME;
+static bool nodEnabled = true;
+static int nodAmplitude = 60;  // tenths of a degree
+static uint32_t nodPeriod = 2400;
+static int pitchZero = PITCH_DEFAULT_ZERO;
 
 // A new network is kept only after it reaches the relay (or, at boot, joins
 // Wi-Fi) within 30 s; otherwise the previous network is restored.
@@ -226,6 +231,9 @@ static void onSocket(WStype_t type, uint8_t *data, size_t length) {
                 if (output) M5.Speaker.setVolume(speakerVolume);
             }
             if (doc["brightness"].is<int>()) M5.Display.setBrightness(constrain(doc["brightness"].as<int>(), 0, 255));
+            if (doc["nod"].is<bool>()) nodEnabled = doc["nod"].as<bool>();
+            if (doc["nodAngle"].is<int>()) nodAmplitude = constrain(doc["nodAngle"].as<int>(), 0, 30) * 10;
+            if (doc["nodPeriod"].is<int>()) nodPeriod = constrain(doc["nodPeriod"].as<int>(), 500, 10000);
             nextDeviceStatus = 0;
         } else if (!strcmp(event, "wifi_set") && trial == Trial::None && requested == Trial::None) {
             // Switch networks from loop(), not from inside the socket callback.
@@ -307,10 +315,11 @@ static uint8_t lightAttempts = 0, lightFailures = 0;
 static uint32_t nextLightAt = 0;
 static int32_t lightColor = -1;
 
-static bool bodyPinBit(uint8_t reg, bool set) {
+// Low registers hold expander pins 0-7, high registers pins 8-15.
+static bool bodyPinBit(uint8_t reg, uint8_t mask, bool set) {
     uint8_t value;
     if (!M5.In_I2C.readRegister(BODY_ADDR, reg, &value, 1, BODY_I2C_HZ)) return false;
-    const uint8_t next = set ? value | 0x20 : value & ~0x20;  // expander pin 13
+    const uint8_t next = set ? value | mask : value & ~mask;
     return next == value || M5.In_I2C.writeRegister8(BODY_ADDR, reg, next, BODY_I2C_HZ);
 }
 
@@ -327,10 +336,10 @@ static bool writeBodyLights(uint16_t color) {
 static bool initBodyLights() {
     uint8_t version = 0;
     if (!M5.In_I2C.readRegister(BODY_ADDR, 0x02, &version, 1, BODY_I2C_HZ) || !version || version == 0xff) return false;
-    return bodyPinBit(0x04, true) &&   // output direction
-           bodyPinBit(0x0c, false) &&  // no pull-down
-           bodyPinBit(0x0a, true) &&   // pull-up
-           bodyPinBit(0x14, false) &&  // push-pull
+    return bodyPinBit(0x04, 0x20, true) &&   // pin 13 (RGB): output direction
+           bodyPinBit(0x0c, 0x20, false) &&  // no pull-down
+           bodyPinBit(0x0a, 0x20, true) &&   // pull-up
+           bodyPinBit(0x14, 0x20, false) &&  // push-pull
            M5.In_I2C.writeRegister8(BODY_ADDR, 0x24, BODY_LIGHTS, BODY_I2C_HZ) && writeBodyLights(0);
 }
 
@@ -362,6 +371,81 @@ static void updateBodyLights() {
         lights = Lights::Unavailable;
         Serial.println("[bot] body lights failed; disabled");
     } else nextLightAt = now + 1000;
+}
+
+// Pitch servo on the body's SCS bus (UART1, TX 6 / RX 7, 1 Mbaud). Only the
+// pitch servo moves; yaw is never commanded. Like the official firmware, torque
+// is released at rest so the head is not held.
+enum class Head : uint8_t { Off, Powering, Resting, Nodding, Returning, Unavailable };
+static Head headState = Head::Off;
+static uint32_t headAt = 0, nodStart = 0, nextHeadAt = 0;
+
+static void servoSend(const uint8_t *packet, size_t length) {
+    while (Serial1.available()) Serial1.read();  // status replies are not needed
+    Serial1.write(packet, length);
+}
+
+static void movePitch(int tenths, uint16_t timeMs) {
+    uint8_t packet[16];
+    servoSend(packet, scsGoalPosition(packet, PITCH_SERVO_ID, pitchRaw(pitchZero, tenths), timeMs));
+}
+
+static void pitchTorque(bool enabled) {
+    uint8_t packet[16];
+    servoSend(packet, scsTorque(packet, PITCH_SERVO_ID, enabled));
+}
+
+// Nod slowly while speaking; ease back to rest and release afterwards.
+static void updateHead() {
+    const uint32_t now = millis();
+    if (lights != Lights::Ready || headState == Head::Unavailable || int32_t(now - nextHeadAt) < 0) return;
+    nextHeadAt = now + 50;
+    const bool wanted = nodEnabled && output;
+    switch (headState) {
+    case Head::Off:
+        if (!wanted) return;
+        // Expander pin 0 enables servo power (VM_EN): output, pull-up, high.
+        if (!bodyPinBit(0x03, 0x01, true) || !bodyPinBit(0x0b, 0x01, false) ||
+            !bodyPinBit(0x09, 0x01, true) || !bodyPinBit(0x05, 0x01, true)) {
+            headState = Head::Unavailable;
+            Serial.println("[bot] servo power unavailable; nodding disabled");
+            return;
+        }
+        headState = Head::Powering;
+        headAt = now + 250;
+        return;
+    case Head::Powering:
+        if (int32_t(now - headAt) < 0) return;
+        headState = Head::Resting;
+        return;
+    case Head::Resting:
+        if (!wanted) return;
+        pitchTorque(true);
+        movePitch(0, 400);
+        nodStart = now + 400;
+        headState = Head::Nodding;
+        return;
+    case Head::Nodding:
+        if (!wanted) {
+            movePitch(0, 700);
+            headAt = now + 900;
+            headState = Head::Returning;
+        } else if (int32_t(now - nodStart) >= 0) {
+            movePitch(nodTenths(now - nodStart, nodAmplitude, nodPeriod), 80);
+        }
+        return;
+    case Head::Returning:
+        if (wanted) {
+            nodStart = now;
+            headState = Head::Nodding;
+        } else if (int32_t(now - headAt) >= 0) {
+            pitchTorque(false);
+            headState = Head::Resting;
+        }
+        return;
+    case Head::Unavailable:
+        return;
+    }
 }
 
 static void drawFace() {
@@ -433,6 +517,15 @@ void setup() {
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);
     storageReady = bot_storage_init() == ESP_OK;
+    nvs_handle_t servoSettings;
+    if (storageReady && nvs_open("servo", NVS_READONLY, &servoSettings) == ESP_OK) {
+        // The StackChan app's calibrated level position, if it saved one.
+        int32_t zero;
+        if (nvs_get_i32(servoSettings, "zero_pos_2", &zero) == ESP_OK && zero >= 0 && zero <= SERVO_RAW_MAX) pitchZero = zero;
+        nvs_close(servoSettings);
+    }
+    Serial.printf("[bot] pitch zero=%d\n", pitchZero);
+    Serial1.begin(1000000, SERIAL_8N1, 7, 6);
     String savedSsid, savedPassword;
     if (loadSavedWifi(savedSsid, savedPassword)) {
         // Fall back to the built-in network if the saved one is unavailable.
@@ -534,6 +627,7 @@ void loop() {
         }
     }
     updateBodyLights();
+    updateHead();
     if (relayConnected && int32_t(millis() - nextDeviceStatus) >= 0) {
         sendDeviceStatus();
         nextDeviceStatus = millis() + 5000;

@@ -17,13 +17,13 @@ const DEFAULTS = {
   maxOutputTokens: 512, speed: 1, reasoningEffort: 'default',
   turnDetection: 'server_vad', vadThreshold: 0.5, prefixPaddingMs: 300,
   silenceDurationMs: 500, eagerness: 'auto', noiseReduction: 'off', expressionTools: true,
-  backendModel: 'gpt-4.1-mini', speakerVolume: 220, screenBrightness: 127,
+  backendModel: 'gpt-4.1-mini', speakerVolume: 220, screenBrightness: 127, headNod: true, nodAngle: 6, nodPeriodMs: 2400,
   timeTool: true, weatherTool: true, webSearchTool: true, location: '', timezone: '', searchModel: 'gpt-4.1-mini',
   backendInstructions: 'Control the robot face using set_expression when its mood should change. Use the time, weather and web search tools for current information instead of guessing. You cannot move the robot or control other devices. Return a brief factual result.',
 };
 
 // Applied by the robot itself; changing only these needs no new conversation.
-export const DEVICE_KEYS = ['speakerVolume', 'screenBrightness'];
+export const DEVICE_KEYS = ['speakerVolume', 'screenBrightness', 'headNod', 'nodAngle', 'nodPeriodMs'];
 
 export function capabilities(model) {
   const live = model.startsWith('gpt-live-');
@@ -57,11 +57,13 @@ export function validateSettings(value) {
       case 'prefixPaddingMs': number(0, 2000, true); break;
       case 'silenceDurationMs': number(100, 3000, true); break;
       case 'speakerVolume': case 'screenBrightness': number(0, 255, true); break;
+      case 'nodAngle': number(2, 20, true); break;
+      case 'nodPeriodMs': number(1000, 5000, true); break;
       case 'reasoningEffort': choice(['default', 'minimal', 'low', 'medium', 'high', 'xhigh']); break;
       case 'turnDetection': choice(['server_vad', 'semantic_vad']); break;
       case 'eagerness': choice(['auto', 'low', 'medium', 'high']); break;
       case 'noiseReduction': choice(['off', 'near_field', 'far_field']); break;
-      case 'expressionTools': case 'timeTool': case 'weatherTool': case 'webSearchTool':
+      case 'expressionTools': case 'headNod': case 'timeTool': case 'weatherTool': case 'webSearchTool':
         if (typeof val !== 'boolean') throw Error(`${key} must be true or false.`); break;
       case 'location': text(100); break;
       case 'timezone': if (typeof val !== 'string' || (val && !validTimezone(val))) throw Error('Use an IANA time zone such as Asia/Tokyo, or leave it empty.'); break;
