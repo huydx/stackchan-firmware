@@ -186,6 +186,11 @@ async function init() {
     $('model').replaceChildren(...models.map(model => new Option(model.name, model.id)));
     if (!models.some(model => model.id === data.settings.model)) $('model').add(new Option(data.settings.model, data.settings.model));
     $('model').disabled = provider === 'azure'; $('providerNote').hidden = provider !== 'azure';
+    $('timezone').placeholder = data.systemTimezone;
+    if (provider === 'azure') {
+      $('webSearchTool').disabled = $('searchModel').disabled = true;
+      $('searchHelp').textContent = 'Web search needs an OpenAI API key; it is not available with Azure.';
+    }
     populate(data.settings); await refreshStatus(); setInterval(refreshStatus, 2000);
   } catch (error) { $('pageError').hidden = false; $('pageError').textContent = `Couldn't load the dashboard: ${error.message}`; }
 }

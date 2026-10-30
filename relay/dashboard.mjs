@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { MODELS, publicSettings, capabilities } from './settings.mjs';
+import { systemTimezone } from './tools.mjs';
 
 const ASSETS = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -49,7 +50,7 @@ export function dashboardHandler(controller) {
       } else if (route === '/api/admin/config' && req.method === 'GET') {
         const config = controller.config();
         json(res, 200, { settings: publicSettings(config), capabilities: capabilities(config.model),
-          models: MODELS.map(model => ({ ...model, capabilities: capabilities(model.id) })), provider: config.provider || 'openai', restartOnSave: true });
+          models: MODELS.map(model => ({ ...model, capabilities: capabilities(model.id) })), provider: config.provider || 'openai', systemTimezone: systemTimezone(), restartOnSave: true });
       } else if (route === '/api/admin/status' && req.method === 'GET') {
         json(res, 200, controller.status());
       } else if (route === '/api/admin/config' && req.method === 'PUT') {

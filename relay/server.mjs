@@ -5,6 +5,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { LiveTransport } from './live-transport.mjs';
 import { DEVICE_KEYS, capabilities, loadSettings, publicSettings, saveSettings, validateWifi, withSettings } from './settings.mjs';
 import { dashboardHandler } from './dashboard.mjs';
+import { createToolRunner, toolDefinitions } from './tools.mjs';
 
 export const CHUNK = 1024;
 export const WINDOW = 8192;
@@ -70,7 +71,7 @@ export function sessionUpdate(config) {
         },
         output: { format: { type: 'audio/pcm', rate: 24000 }, voice: config.voice, speed: settings.speed },
       },
-      tools: [{
+      tools: [...settings.expressionTools ? [{
         type: 'function', name: 'set_expression',
         description: 'Change the robot face to match the conversation.',
         parameters: {
@@ -78,11 +79,10 @@ export function sessionUpdate(config) {
           properties: { expression: { type: 'string', enum: expressions } },
           required: ['expression'],
         },
-      }],
-      tool_choice: settings.expressionTools ? 'auto' : 'none',
+      }] : [], ...toolDefinitions(settings, config.provider)],
     },
   };
-  if (!settings.expressionTools) result.session.tools = [];
+  result.session.tool_choice = result.session.tools.length ? 'auto' : 'none';
   if (capabilities(settings.model).reasoning && settings.reasoningEffort !== 'default') {
     result.session.reasoning = { effort: settings.reasoningEffort };
   }
@@ -97,7 +97,7 @@ function authorized(header, token) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
-export function createRelay(config, log = console) {
+export function createRelay(config, log = console, { fetch } = {}) {
   let active, controls;
   let state = { deviceConnected: false, apiReady: false, activity: 'offline', micFrames: 0,
     playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
@@ -176,10 +176,11 @@ export function createRelay(config, log = console) {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
     };
     const toDevice = obj => json(device, obj);
+    const runTool = createToolRunner({ ...config, ...publicSettings(config) }, { fetch, log });
     const toCloud = obj => json(upstream, obj);
     controls = { test: text => toCloud({ type: 'response.create', response: {
       instructions: `Read aloud this test phrase, without taking any actions: ${text}`,
-      tool_choice: 'none', max_output_tokens: 128,
+      tool_choice: 'none', max_output_tokens: 512,
     } }),
     configure: () => toDevice(deviceConfig()),
     wifi: request => toDevice({ type: 'wifi_set', ...request }) };
@@ -277,6 +278,25 @@ export function createRelay(config, log = console) {
       } else fail('unknown_device_event');
     });
 
+    async function call(item) {
+      let args;
+      try { args = JSON.parse(item.arguments); } catch { return { ok: false, error: 'Invalid arguments' }; }
+      if (item.name !== 'set_expression') return runTool(item.name, args);
+      if (config.expressionTools === false || !expressions.includes(args?.expression)) return { ok: false, error: 'Unsupported tool or expression' };
+      toDevice({ type: 'expression', value: args.expression });
+      return { ok: true, expression: args.expression };
+    }
+    // Lookups can take seconds; the turn stays busy, so the mic waits for the answer.
+    async function runCalls(calls) {
+      if (!started) session.activity = 'thinking';
+      const results = await Promise.all(calls.map(call));
+      if (closed) return;
+      lastProgress = Date.now();
+      calls.forEach((item, index) => toCloud({ type: 'conversation.item.create', item: {
+        type: 'function_call_output', call_id: item.call_id, output: JSON.stringify(results[index]),
+      } }));
+      toCloud({ type: 'response.create' });
+    }
     upstream.on('message', (data, binary) => {
       if (closed) return;
       let event;
@@ -318,22 +338,11 @@ export function createRelay(config, log = console) {
         }
         pump();
       } else if (event.type === 'response.done') {
-        if (event.response?.status !== 'completed') return fail('response_incomplete');
+        // "incomplete" means the reply hit its token limit: play what arrived and continue.
+        if (!['completed', 'incomplete'].includes(event.response?.status)) return fail('response_incomplete');
         if (!Array.isArray(event.response.output)) return fail('invalid_response_output');
         const calls = event.response.output.filter(item => item?.type === 'function_call');
-        for (const call of calls) {
-          let result;
-          try {
-            const args = JSON.parse(call.arguments);
-            if (call.name !== 'set_expression' || !expressions.includes(args?.expression)) throw Error();
-            toDevice({ type: 'expression', value: args.expression });
-            result = { ok: true, expression: args.expression };
-          } catch { result = { ok: false, error: 'Unsupported tool or expression' }; }
-          toCloud({ type: 'conversation.item.create', item: {
-            type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result),
-          } });
-        }
-        if (calls.length) toCloud({ type: 'response.create' });
+        if (calls.length) runCalls(calls);
         else if (started) { ending = true; pump(); }
         else { busy = false; session.activity = 'idle'; }
       }

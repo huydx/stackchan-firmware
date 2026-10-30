@@ -1,6 +1,7 @@
 import { readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { validTimezone } from './tools.mjs';
 
 export const SETTINGS_FILE = new URL('settings.json', import.meta.url);
 export const MODELS = [
@@ -17,7 +18,8 @@ const DEFAULTS = {
   turnDetection: 'server_vad', vadThreshold: 0.5, prefixPaddingMs: 300,
   silenceDurationMs: 500, eagerness: 'auto', noiseReduction: 'off', expressionTools: true,
   backendModel: 'gpt-4.1-mini', speakerVolume: 220, screenBrightness: 127,
-  backendInstructions: 'Control the robot face using set_expression when its mood should change. You cannot move the robot or control other devices. Return a brief factual result.',
+  timeTool: true, weatherTool: true, webSearchTool: true, location: '', timezone: '', searchModel: 'gpt-4.1-mini',
+  backendInstructions: 'Control the robot face using set_expression when its mood should change. Use the time, weather and web search tools for current information instead of guessing. You cannot move the robot or control other devices. Return a brief factual result.',
 };
 
 // Applied by the robot itself; changing only these needs no new conversation.
@@ -46,7 +48,7 @@ export function validateSettings(value) {
     };
     const choice = choices => { if (!choices.includes(val)) throw Error(`Invalid ${key}.`); };
     switch (key) {
-      case 'model': case 'backendModel': text(100, /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/); break;
+      case 'model': case 'backendModel': case 'searchModel': text(100, /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/); break;
       case 'voice': choice(LIVE_VOICES); break;
       case 'instructions': case 'backendInstructions': text(12000); break;
       case 'maxOutputTokens': number(16, 4096, true); break;
@@ -59,7 +61,10 @@ export function validateSettings(value) {
       case 'turnDetection': choice(['server_vad', 'semantic_vad']); break;
       case 'eagerness': choice(['auto', 'low', 'medium', 'high']); break;
       case 'noiseReduction': choice(['off', 'near_field', 'far_field']); break;
-      case 'expressionTools': if (typeof val !== 'boolean') throw Error('expressionTools must be true or false.'); break;
+      case 'expressionTools': case 'timeTool': case 'weatherTool': case 'webSearchTool':
+        if (typeof val !== 'boolean') throw Error(`${key} must be true or false.`); break;
+      case 'location': text(100); break;
+      case 'timezone': if (typeof val !== 'string' || (val && !validTimezone(val))) throw Error('Use an IANA time zone such as Asia/Tokyo, or leave it empty.'); break;
     }
   }
   return value;

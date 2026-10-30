@@ -160,3 +160,33 @@ test('device disconnect closes the cloud connection', { timeout: 5000 }, async t
   f.device.close();
   await closed;
 });
+
+test('data tool calls run asynchronously before the response continues', { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  send(f.upstream, { type: 'session.updated' });
+  await f.received.next();
+  send(f.upstream, { type: 'response.created' });
+  send(f.upstream, { type: 'response.done', response: { status: 'completed', output: [
+    { type: 'function_call', name: 'get_current_time', call_id: 'time', arguments: '{"timezone":"Asia/Tokyo"}' },
+  ] } });
+  const output = await f.sent.next();
+  assert.equal(output.item.call_id, 'time');
+  const result = JSON.parse(output.item.output);
+  assert.equal(result.ok, true);
+  assert.equal(result.timezone, 'Asia/Tokyo');
+  assert.deepEqual(await f.sent.next(), { type: 'response.create' });
+});
+
+test('a reply cut off by its token limit ends normally instead of failing the session', { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  send(f.upstream, { type: 'session.updated' });
+  await f.received.next();
+  send(f.upstream, { type: 'response.created' });
+  send(f.upstream, { type: 'response.output_audio.delta', delta: Buffer.alloc(CHUNK).toString('base64') });
+  assert.equal((await f.received.next()).type, 'audio_start');
+  assert.equal((await f.received.next()).length, CHUNK);
+  send(f.upstream, { type: 'response.done', response: { status: 'incomplete', output: [] } });
+  send(f.device, { type: 'played', bytes: CHUNK });
+  assert.deepEqual(await f.received.next(), { type: 'audio_end' });
+  assert.deepEqual(f.errors, []);
+});

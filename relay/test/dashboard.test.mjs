@@ -133,8 +133,13 @@ test('supported controls map to API fields and incompatible controls are omitted
   assert.equal(update.audio.input.turn_detection.type, 'semantic_vad');
   assert.equal(update.audio.input.turn_detection.eagerness, 'low');
   assert.equal(update.audio.input.noise_reduction.type, 'near_field');
-  assert.deepEqual(update.tools, []);
-  assert.equal(update.tool_choice, 'none');
+  assert.deepEqual(update.tools.map(tool => tool.name), ['get_current_time', 'get_weather', 'web_search']);
+  assert.equal(update.tool_choice, 'auto');
+  const none = sessionUpdate(withSettings(config, { timeTool: false, weatherTool: false, webSearchTool: false })).session;
+  assert.deepEqual(none.tools, []);
+  assert.equal(none.tool_choice, 'none');
+  assert.throws(() => withSettings(base, { timezone: 'Mars/Olympus' }), /time zone/);
+  assert.equal(withSettings(base, { timezone: 'Asia/Tokyo', location: 'Tokyo' }).timezone, 'Asia/Tokyo');
   const older = sessionUpdate(withSettings(config, { model: 'gpt-realtime-1.5' })).session;
   assert.equal(older.reasoning, undefined);
   assert.throws(() => withSettings(base, { voice: 'harema' }), /voice/);

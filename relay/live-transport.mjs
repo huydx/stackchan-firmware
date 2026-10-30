@@ -3,6 +3,16 @@ import WebSocket from 'ws';
 
 // Adapt Live's continuous duplex stream to this device's half-duplex player.
 // The existing device protocol and its bounded playback-credit queue stay intact.
+// Tell the Live voice model what its tool backend can do.
+function liveDelegation(tools) {
+  const names = new Set(tools.map(tool => tool.name)), skills = [];
+  if (names.has('get_current_time')) skills.push('check the current time');
+  if (names.has('get_weather')) skills.push('check the weather');
+  if (names.has('web_search')) skills.push('search the web for recent information');
+  if (names.has('set_expression')) skills.push('change your face expression');
+  return skills.length ? ` A backend can ${skills.join(', ')}. Delegate those to it instead of guessing.` : '';
+}
+
 export class LiveTransport extends EventEmitter {
   constructor(url, options, config) {
     super();
@@ -38,7 +48,7 @@ export class LiveTransport extends EventEmitter {
     if (event.type === 'session.update') {
       const session = {
         model: this.config.model,
-        instructions: this.config.instructions + (this.config.expressionTools === false ? '' : ' A backend can change your face expression. Delegate those changes to it.'),
+        instructions: this.config.instructions + liveDelegation(event.session.tools),
         audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: this.config.voice } },
         delegation: {
           type: 'responses',

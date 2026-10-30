@@ -141,6 +141,12 @@ previous network after 30 seconds otherwise. At boot it falls back to the
 built-in `bot_config.h` network if the saved one is unavailable. Wi-Fi
 passwords are sent only to the robot and are never stored by the relay.
 
+**Live information** tools let the model look things up instead of guessing:
+the current time (computed locally), weather (Open-Meteo, free, only the city
+name is sent) and web search (OpenAI Responses `web_search`, billed per search;
+not available with Azure). Each can be switched off, and a home city and time
+zone are used when the user names none. They work in Realtime and GPT-Live mode.
+
 The dashboard does not expose API keys or device tokens. Foreign origins and
 non-local Host headers are rejected; keep the management page local rather
 than publishing it through an unauthenticated proxy.
