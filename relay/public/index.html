@@ -89,7 +89,7 @@
         </section>
         <section class="card" id="robot">
           <div class="section-heading"><div><p class="eyebrow">05 / ROBOT</p><h2>Make yourself at home.</h2></div><span class="tag">Applies instantly</span></div>
-          <p class="help">Volume, brightness and head movement apply on the robot right away, without starting a new conversation.</p>
+          <p class="help">Volume, brightness, head movement and face tracking apply on the robot right away, without starting a new conversation.</p>
           <div class="fields two">
             <label>Speaker volume <output id="volumeValue" for="speakerVolume">86%</output><input type="range" name="speakerVolume" id="speakerVolume" min="0" max="255" step="5"><small>Loud settings can distort on the small speaker.</small></label>
             <label>Screen brightness <output id="brightnessValue" for="screenBrightness">50%</output><input type="range" name="screenBrightness" id="screenBrightness" min="0" max="255" step="5"><small>At 0% the screen goes dark; the robot keeps working.</small></label>
@@ -98,6 +98,11 @@
             <label class="toggle-field"><span>Head movement</span><span class="toggle-line"><input type="checkbox" name="headNod" id="headNod" role="switch"><span>Nod while speaking</span></span><small>The head rests and relaxes when quiet.</small></label>
             <label>Nod angle <output id="nodAngleValue" for="nodAngle">6°</output><input type="range" name="nodAngle" id="nodAngle" min="2" max="20" step="1"><small>How far the head tips up.</small></label>
             <label>Nod speed <output id="nodPeriodValue" for="nodPeriodMs">2.4 s</output><input type="range" name="nodPeriodMs" id="nodPeriodMs" min="1000" max="5000" step="200"><small>Seconds per nod; longer is slower.</small></label>
+          </div>
+          <div class="fields three spaced">
+            <label class="toggle-field"><span>Face tracking <span id="cameraState" class="tag">—</span></span><span class="toggle-line"><input type="checkbox" name="faceTracking" id="faceTracking" role="switch"><span>Turn toward the person talking</span></span><small id="cameraHelp">The camera looks for faces; this Mac detects them. Snapshots stay on this Mac and aren't saved.</small></label>
+            <label class="toggle-field"><span>If it turns the wrong way</span><span class="toggle-line"><input type="checkbox" name="trackReverseX" id="trackReverseX" role="switch"><span>Reverse left / right</span></span><small>Try this if the head turns away from you.</small></label>
+            <label class="toggle-field"><span>&nbsp;</span><span class="toggle-line"><input type="checkbox" name="trackReverseY" id="trackReverseY" role="switch"><span>Reverse up / down</span></span><small>Try this if it looks away vertically.</small></label>
           </div>
           <div class="wifi spaced">
             <div class="wifi-heading"><h3>Wi-Fi</h3><span id="wifiCurrent" class="tag">Robot offline</span></div>

@@ -141,6 +141,22 @@ previous network after 30 seconds otherwise. At boot it falls back to the
 built-in `bot_config.h` network if the saved one is unavailable. Wi-Fi
 passwords are sent only to the robot and are never stored by the relay.
 
+The face is animated with spring-physics eyes ported from
+[Grobot_Animations](https://github.com/tanmaywankar/Grobot_Animations) (MIT):
+moods follow the model's expressions, the eyes blink, glance around and follow
+a tracked face, and a mouth opens with speech. It renders on its own task so
+drawing never delays audio. Eye colors: blue-green ready, gray muted, orange
+connecting.
+
+**Face tracking** turns the head toward the nearest face. The robot sends
+small grayscale camera snapshots (160x120 JPEG, about three a second) to the
+relay, which finds faces with macOS's Vision framework through a Swift helper
+(`relay/face/FaceDetect.swift`, compiled on first use into the ignored
+`relay/.build/`). Snapshots stay on this Mac and are not stored. The on-device
+face detector does not fit in the RealtimeBot partition. Reverse switches
+correct the direction if the head turns away. While speaking, the head nods
+slowly; both apply live from the Robot section.
+
 **Live information** tools let the model look things up instead of guessing:
 the current time (computed locally), weather (Open-Meteo, free, only the city
 name is sent) and web search (OpenAI Responses `web_search`, billed per search;

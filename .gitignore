@@ -4,3 +4,4 @@ relay/.env
 relay/node_modules/
 relay/settings.json
 relay/.settings-*.tmp
+relay/.build/

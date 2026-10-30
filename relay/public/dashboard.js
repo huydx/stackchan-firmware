@@ -39,6 +39,7 @@ function updateDirty() {
   $('nodAngleValue').textContent = `${form.elements.nodAngle.value}°`;
   $('nodPeriodValue').textContent = `${(Number(form.elements.nodPeriodMs.value) / 1000).toFixed(1)} s`;
   $('nodAngle').disabled = $('nodPeriodMs').disabled = !$('headNod').checked;
+  $('trackReverseX').disabled = $('trackReverseY').disabled = !$('faceTracking').checked;
 }
 function updateCapabilities() {
   const model = $('model').value;
@@ -90,6 +91,7 @@ function renderStatus(status) {
   $('testButton').disabled = !ready || ['thinking', 'speaking'].includes(status.activity) || busy;
   $('reconnectButton').disabled = !status.deviceConnected || busy;
   renderWifi(status);
+  renderCamera(status);
   if (status.lastError) {
     $('pageError').textContent = `The last session reported ${status.lastError.code}. Review your settings or choose another model.`;
     $('pageError').hidden = false;
@@ -123,6 +125,15 @@ function renderWifi(status) {
   else if (wifi?.finishedAt && Date.now() - wifi.finishedAt < 300000) notice = (wifiMessages[wifi.state] || (() => ['error', 'The robot reported an unknown Wi-Fi result.']))(wifi.ssid);
   $('wifiNotice').hidden = !notice;
   if (notice) { $('wifiNotice').className = `notice ${notice[0]}`; $('wifiNotice').textContent = notice[1]; }
+}
+function renderCamera(status) {
+  const camera = status.deviceConnected ? status.device?.camera : null;
+  const labels = { face: 'Face found', searching: 'Looking', off: 'Off', unavailable: 'No camera' };
+  $('cameraState').textContent = status.faceDetector === 'unavailable' ? 'Detector unavailable' : labels[camera] || '—';
+  $('cameraHelp').textContent = status.faceDetector === 'unavailable'
+    ? "This Mac couldn't start face detection (it needs macOS and the Swift compiler). Check the relay log."
+    : camera === 'unavailable' ? "The robot's camera didn't start. Restart the robot to try again."
+    : "The camera looks for faces; this Mac detects them. Snapshots stay on this Mac and aren't saved.";
 }
 async function changeWifi(request, message) {
   $('wifiSwitchButton').disabled = $('wifiBuiltinButton').disabled = true;

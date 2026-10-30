@@ -7,6 +7,9 @@
 #include "playback_pool.h"
 #include "body_lights.h"
 #include "head_nod.h"
+#include "face_track.h"
+#include "face_camera.h"
+#include "face_display.h"
 #if __has_include("bot_config.h")
 #include "bot_config.h"
 #else
@@ -42,7 +45,9 @@ static uint8_t speakerVolume = BOT_SPEAKER_VOLUME;
 static bool nodEnabled = true;
 static int nodAmplitude = 60;  // tenths of a degree
 static uint32_t nodPeriod = 2400;
-static int pitchZero = PITCH_DEFAULT_ZERO;
+static int pitchZero = PITCH_DEFAULT_ZERO, yawZero = YAW_DEFAULT_ZERO;
+static bool trackEnabled = true, reverseX = false, reverseY = false, frameInFlight = false;
+static uint32_t frameSentAt = 0;
 
 // A new network is kept only after it reaches the relay (or, at boot, joins
 // Wi-Fi) within 30 s; otherwise the previous network is restored.
@@ -127,6 +132,13 @@ static void sendDeviceStatus() {
     doc["storage"] = storageReady;
     doc["volume"] = speakerVolume;
     doc["brightness"] = M5.Display.getBrightness();
+    doc["camera"] = faceCameraState();
+    doc["cameraStackFree"] = faceCameraStackFree();
+    // Why the robot last started, to diagnose crashes without the USB port.
+    static const char *const reasons[] = {"unknown", "power_on", "external", "software", "panic", "interrupt_watchdog",
+                                          "task_watchdog", "watchdog", "deep_sleep", "brownout", "sdio", "usb", "jtag"};
+    const unsigned reason = unsigned(esp_reset_reason());
+    doc["reset"] = reason < sizeof reasons / sizeof *reasons ? reasons[reason] : "unknown";
     String text;
     serializeJson(doc, text);
     socket.sendTXT(text);
@@ -234,7 +246,13 @@ static void onSocket(WStype_t type, uint8_t *data, size_t length) {
             if (doc["nod"].is<bool>()) nodEnabled = doc["nod"].as<bool>();
             if (doc["nodAngle"].is<int>()) nodAmplitude = constrain(doc["nodAngle"].as<int>(), 0, 30) * 10;
             if (doc["nodPeriod"].is<int>()) nodPeriod = constrain(doc["nodPeriod"].as<int>(), 500, 10000);
+            if (doc["track"].is<bool>()) faceCameraSetEnabled(trackEnabled = doc["track"].as<bool>());
+            if (doc["reverseX"].is<bool>()) reverseX = doc["reverseX"].as<bool>();
+            if (doc["reverseY"].is<bool>()) reverseY = doc["reverseY"].as<bool>();
             nextDeviceStatus = 0;
+        } else if (!strcmp(event, "face")) {
+            frameInFlight = false;
+            if (doc["found"] | false) faceCameraSetFace(doc["x"] | 0.0f, doc["y"] | 0.0f);
         } else if (!strcmp(event, "wifi_set") && trial == Trial::None && requested == Trial::None) {
             // Switch networks from loop(), not from inside the socket callback.
             const char *ssid = doc["ssid"] | "";
@@ -373,116 +391,115 @@ static void updateBodyLights() {
     } else nextLightAt = now + 1000;
 }
 
-// Pitch servo on the body's SCS bus (UART1, TX 6 / RX 7, 1 Mbaud). Only the
-// pitch servo moves; yaw is never commanded. Like the official firmware, torque
-// is released at rest so the head is not held.
-enum class Head : uint8_t { Off, Powering, Resting, Nodding, Returning, Unavailable };
-static Head headState = Head::Off;
-static uint32_t headAt = 0, nodStart = 0, nextHeadAt = 0;
+// Head servos on the body's SCS bus (UART1, TX 6 / RX 7, 1 Mbaud): pitch
+// nods while speaking; with face tracking on, yaw and pitch turn toward the
+// nearest face. Yaw is only commanded when tracking is on. Like the official
+// firmware, torque is released at rest so the head is not held.
+enum class Servos : uint8_t { Off, Powering, Ready, Unavailable };
+static Servos servos = Servos::Off;
+static bool torqueOn = false;
+static Gaze gazeTarget, gazeNow;
+static int sentYaw = INT32_MIN, sentPitch = INT32_MIN;
+static float nodScale = 0;
+static uint32_t servoAt = 0, nodStart = 0, nextHeadAt = 0, lastFaceAt = 0, restingSince = 0;
 
 static void servoSend(const uint8_t *packet, size_t length) {
     while (Serial1.available()) Serial1.read();  // status replies are not needed
     Serial1.write(packet, length);
 }
 
-static void movePitch(int tenths, uint16_t timeMs) {
+static void moveServo(uint8_t id, int raw, uint16_t timeMs) {
     uint8_t packet[16];
-    servoSend(packet, scsGoalPosition(packet, PITCH_SERVO_ID, pitchRaw(pitchZero, tenths), timeMs));
+    servoSend(packet, scsGoalPosition(packet, id, raw, timeMs));
 }
 
-static void pitchTorque(bool enabled) {
+static void setTorque(bool enabled) {
     uint8_t packet[16];
     servoSend(packet, scsTorque(packet, PITCH_SERVO_ID, enabled));
+    if (trackEnabled || !enabled) servoSend(packet, scsTorque(packet, YAW_SERVO_ID, enabled));
+    torqueOn = enabled;
+    sentYaw = sentPitch = INT32_MIN;
 }
 
-// Nod slowly while speaking; ease back to rest and release afterwards.
 static void updateHead() {
     const uint32_t now = millis();
-    if (lights != Lights::Ready || headState == Head::Unavailable || int32_t(now - nextHeadAt) < 0) return;
+    if (lights != Lights::Ready || servos == Servos::Unavailable || int32_t(now - nextHeadAt) < 0) return;
     nextHeadAt = now + 50;
-    const bool wanted = nodEnabled && output;
-    switch (headState) {
-    case Head::Off:
-        if (!wanted) return;
+
+    // Turn toward each new face sighting, measured from where the head is now.
+    float x, y;
+    uint32_t age;
+    if (trackEnabled && faceCameraLatest(x, y, age) && age < 1000 && now - age != lastFaceAt) {
+        lastFaceAt = now - age;
+        gazeTarget = gazeToward(gazeNow, x, y, reverseX, reverseY);
+    }
+    const bool tracking = trackEnabled && lastFaceAt && now - lastFaceAt < 10000;
+    if (!tracking) gazeTarget = Gaze();  // nobody seen for a while: face forward
+    const bool speaking = nodEnabled && output;
+    if (speaking && nodScale == 0) nodStart = now;
+    nodScale = speaking ? min(1.0f, nodScale + 0.1f) : max(0.0f, nodScale - 0.1f);
+    const bool active = tracking || nodScale > 0 || gazeNow.yaw || gazeNow.pitch;
+
+    if (servos == Servos::Off) {
+        if (!active) return;
         // Expander pin 0 enables servo power (VM_EN): output, pull-up, high.
         if (!bodyPinBit(0x03, 0x01, true) || !bodyPinBit(0x0b, 0x01, false) ||
             !bodyPinBit(0x09, 0x01, true) || !bodyPinBit(0x05, 0x01, true)) {
-            headState = Head::Unavailable;
-            Serial.println("[bot] servo power unavailable; nodding disabled");
+            servos = Servos::Unavailable;
+            Serial.println("[bot] servo power unavailable; head movement disabled");
             return;
         }
-        headState = Head::Powering;
-        headAt = now + 250;
+        servos = Servos::Powering;
+        servoAt = now + 250;
         return;
-    case Head::Powering:
-        if (int32_t(now - headAt) < 0) return;
-        headState = Head::Resting;
+    }
+    if (servos == Servos::Powering) {
+        if (int32_t(now - servoAt) < 0) return;
+        servos = Servos::Ready;
+    }
+    if (!active) {
+        // Release once the head has been back at rest for a second.
+        if (!restingSince) restingSince = now;
+        if (torqueOn && now - restingSince > 1000) setTorque(false);
         return;
-    case Head::Resting:
-        if (!wanted) return;
-        pitchTorque(true);
-        movePitch(0, 400);
-        nodStart = now + 400;
-        headState = Head::Nodding;
-        return;
-    case Head::Nodding:
-        if (!wanted) {
-            movePitch(0, 700);
-            headAt = now + 900;
-            headState = Head::Returning;
-        } else if (int32_t(now - nodStart) >= 0) {
-            movePitch(nodTenths(now - nodStart, nodAmplitude, nodPeriod), 80);
-        }
-        return;
-    case Head::Returning:
-        if (wanted) {
-            nodStart = now;
-            headState = Head::Nodding;
-        } else if (int32_t(now - headAt) >= 0) {
-            pitchTorque(false);
-            headState = Head::Resting;
-        }
-        return;
-    case Head::Unavailable:
-        return;
+    }
+    restingSince = 0;
+    if (!torqueOn) setTorque(true);
+    gazeNow.yaw = approach(gazeNow.yaw, gazeTarget.yaw, 15);  // at most 30 degrees per second
+    gazeNow.pitch = approach(gazeNow.pitch, gazeTarget.pitch, 15);
+    const int nod = int(nodScale * nodTenths(now - nodStart, nodAmplitude, nodPeriod));
+    const int pitch = pitchRaw(pitchZero, gazeNow.pitch + nod);
+    if (pitch != sentPitch) moveServo(PITCH_SERVO_ID, sentPitch = pitch, 100);
+    if (trackEnabled) {
+        const int yaw = yawRaw(yawZero, gazeNow.yaw);
+        if (yaw != sentYaw) moveServo(YAW_SERVO_ID, sentYaw = yaw, 100);
     }
 }
 
-static void drawFace() {
-    auto &lcd = M5.Display;
-    uint16_t color = !ready ? TFT_ORANGE : muted ? TFT_DARKGREY : TFT_CYAN;
+// Hand the current state to the face task, which owns the display.
+static void publishFace() {
     static String previousStatus, previousExpression;
-    static uint16_t previousColor = 0;
-    const bool redraw = status != previousStatus || expression != previousExpression || color != previousColor;
-    if (!redraw) {
-        // Avoid a full-screen SPI transfer between every pair of audio chunks.
-        lcd.fillRect(120, 120, 81, 75, TFT_BLACK);
-        lcd.fillEllipse(160, expression == "sad" ? 166 : 155, 32, 3 + int(mouth * 25), color);
-        return;
+    if (status != previousStatus || expression != previousExpression) {
+        previousStatus = status;
+        previousExpression = expression;
+        Serial.printf("[bot] state=%s expression=%s\n", status.c_str(), expression.c_str());
     }
-    previousStatus = status;
-    previousExpression = expression;
-    previousColor = color;
-    Serial.printf("[bot] state=%s expression=%s\n", status.c_str(), expression.c_str());
-    lcd.fillScreen(TFT_BLACK);
-    int eyeY = 88;
-    if (expression == "sleepy") {
-        lcd.fillRect(70, eyeY, 45, 5, color);
-        lcd.fillRect(205, eyeY, 45, 5, color);
-    } else {
-        lcd.fillEllipse(92, eyeY, 18, expression == "happy" ? 8 : 25, color);
-        lcd.fillEllipse(227, eyeY, 18, expression == "happy" ? 8 : 25, color);
+    FaceView view;
+    strlcpy(view.status, status.c_str(), sizeof view.status);
+    strlcpy(view.expression, expression.c_str(), sizeof view.expression);
+    view.mouth = mouth;
+    view.speaking = output;
+    view.ready = ready;
+    view.muted = muted;
+    float x, y;
+    uint32_t age;
+    if (trackEnabled && faceCameraLatest(x, y, age) && age < 1500) {
+        // A face on the camera's right is on the screen's left, seen from the front.
+        view.looking = true;
+        view.lookX = reverseX ? x : -x;
+        view.lookY = reverseY ? -y : y;
     }
-    if (expression == "angry") {
-        lcd.drawLine(65, 45, 115, 65, color);
-        lcd.drawLine(205, 65, 255, 45, color);
-    }
-    int y = expression == "sad" ? 166 : 155;
-    lcd.fillEllipse(160, y, 32, 3 + int(mouth * 25), color);
-    lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-    lcd.setTextDatum(m5gfx::textdatum_t::middle_center);
-    lcd.drawString(status, 160, 207);
-    lcd.drawString("Tap: mute microphone", 160, 229);
+    faceDisplayUpdate(view);
 }
 
 void setup() {
@@ -505,11 +522,14 @@ void setup() {
     Serial.begin(115200);
     Serial.printf("[bot] startup board=%d display=%dx%d psram=%u\n", int(M5.getBoard()),
                   M5.Display.width(), M5.Display.height(), unsigned(ESP.getPsramSize()));
+    faceDisplayBegin();
+    // Before any audio: camera setup borrows the internal I2C bus briefly.
+    faceCameraBegin();
     micQueue = xQueueCreate(8, sizeof(MicFrame));
     micLock = xSemaphoreCreateMutex();
     if (!micQueue || !micLock || xTaskCreate(captureTask, "bot_capture", 4096, nullptr, 2, nullptr) != pdPASS) {
         status = "Audio allocation failed";
-        drawFace();
+        publishFace();
         for (;;) delay(1000);
     }
     WiFi.persistent(false);
@@ -522,9 +542,10 @@ void setup() {
         // The StackChan app's calibrated level position, if it saved one.
         int32_t zero;
         if (nvs_get_i32(servoSettings, "zero_pos_2", &zero) == ESP_OK && zero >= 0 && zero <= SERVO_RAW_MAX) pitchZero = zero;
+        if (nvs_get_i32(servoSettings, "zero_pos_1", &zero) == ESP_OK && zero >= 0 && zero <= SERVO_RAW_MAX) yawZero = zero;
         nvs_close(servoSettings);
     }
-    Serial.printf("[bot] pitch zero=%d\n", pitchZero);
+    Serial.printf("[bot] servo zero yaw=%d pitch=%d\n", yawZero, pitchZero);
     Serial1.begin(1000000, SERIAL_8N1, 7, 6);
     String savedSsid, savedPassword;
     if (loadSavedWifi(savedSsid, savedPassword)) {
@@ -628,13 +649,24 @@ void loop() {
     }
     updateBodyLights();
     updateHead();
+    // One camera snapshot in flight at a time; the relay replies with any face.
+    if (relayConnected && trackEnabled && (!frameInFlight || millis() - frameSentAt > 2000)) {
+        uint8_t *frame;
+        size_t frameLength;
+        if (faceCameraTakeFrame(frame, frameLength)) {
+            socket.sendBIN(frame, frameLength);
+            free(frame);
+            frameInFlight = true;
+            frameSentAt = millis();
+        }
+    }
     if (relayConnected && int32_t(millis() - nextDeviceStatus) >= 0) {
         sendDeviceStatus();
         nextDeviceStatus = millis() + 5000;
     }
     if (int32_t(millis() - nextDraw) >= 0) {
-        drawFace();
-        nextDraw = millis() + 100;
+        publishFace();
+        nextDraw = millis() + 40;
     }
     static uint32_t nextDiagnostic = 0;
     if (int32_t(millis() - nextDiagnostic) >= 0) {

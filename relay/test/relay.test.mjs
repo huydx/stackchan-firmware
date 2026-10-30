@@ -19,7 +19,7 @@ function inbox(ws) {
 const send = (ws, event) => ws.send(JSON.stringify(event));
 const tick = () => new Promise(resolve => setTimeout(resolve, 30));
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const cloud = new WebSocketServer({ port: 0 });
   await once(cloud, 'listening');
   const errors = [];
@@ -27,7 +27,7 @@ async function fixture(t) {
     host: '127.0.0.1', port: 0, token: 'x'.repeat(32),
     url: `ws://127.0.0.1:${cloud.address().port}`, headers: {},
     voice: 'marin', instructions: 'test bot',
-  }, { error: message => errors.push(message) });
+  }, { error: message => errors.push(message) }, options);
   await relay.listen();
   t.after(async () => {
     await relay.close();
@@ -43,7 +43,7 @@ async function fixture(t) {
   await once(device, 'open');
   const [upstream, sent] = await cloudConnected;
   const setup = await sent.next();
-  assert.deepEqual(await received.next(), { type: 'device_config', volume: 220, brightness: 127, nod: true, nodAngle: 6, nodPeriod: 2400 });
+  assert.deepEqual(await received.next(), { type: 'device_config', volume: 220, brightness: 127, nod: true, nodAngle: 6, nodPeriod: 2400, track: true, reverseX: false, reverseY: false });
   return { relay, cloud, device, received, upstream, sent, setup, errors };
 }
 
@@ -189,4 +189,23 @@ test('a reply cut off by its token limit ends normally instead of failing the se
   send(f.device, { type: 'played', bytes: CHUNK });
   assert.deepEqual(await f.received.next(), { type: 'audio_end' });
   assert.deepEqual(f.errors, []);
+});
+
+test('camera snapshots are answered with the largest face, one at a time', { timeout: 5000 }, async t => {
+  const images = [];
+  let release;
+  const faceDetector = { state: 'ready', close() {}, detect: image => {
+    images.push(image.toString());
+    return new Promise(resolve => { release = () => resolve({ found: true, x: 0.25, y: -0.5 }); });
+  } };
+  const f = await fixture(t, { faceDetector });
+  f.device.send(Buffer.concat([Buffer.from('FRM1'), Buffer.from('jpeg-one')]));
+  f.device.send(Buffer.concat([Buffer.from('FRM1'), Buffer.from('jpeg-two')]));
+  assert.deepEqual(await f.received.next(), { type: 'face', found: false }, 'second frame dropped while busy');
+  release();
+  assert.deepEqual(await f.received.next(), { type: 'face', found: true, x: 0.25, y: -0.5 });
+  assert.deepEqual(images, ['jpeg-one']);
+  assert.deepEqual(f.errors, []);
+  f.device.send(Buffer.alloc(CHUNK + 1));
+  assert.equal((await f.received.next()).code, 'invalid_microphone_chunk');
 });

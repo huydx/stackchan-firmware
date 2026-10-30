@@ -14,6 +14,13 @@ class HeadNod(unittest.TestCase):
                             str(ROOT / "tests/head_nod_test.cpp"), "-o", binary], check=True)
             subprocess.run([binary], check=True)
 
+    def test_face_tracking_gaze(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = str(Path(temporary) / "face_track_test")
+            subprocess.run(["c++", "-std=c++11", "-I", str(ROOT / "src"),
+                            str(ROOT / "tests/face_track_test.cpp"), "-o", binary], check=True)
+            subprocess.run([binary], check=True)
+
 
 if __name__ == "__main__":
     unittest.main()

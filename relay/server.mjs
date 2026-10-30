@@ -6,8 +6,10 @@ import { LiveTransport } from './live-transport.mjs';
 import { DEVICE_KEYS, capabilities, loadSettings, publicSettings, saveSettings, validateWifi, withSettings } from './settings.mjs';
 import { dashboardHandler } from './dashboard.mjs';
 import { createToolRunner, toolDefinitions } from './tools.mjs';
+import { createFaceDetector } from './face-detector.mjs';
 
 export const CHUNK = 1024;
+const MAX_FRAME = 32768;
 export const WINDOW = 8192;
 export const MAX_QUEUE = 1536 * 1024;
 const expressions = ['neutral', 'happy', 'sad', 'angry', 'sleepy'];
@@ -97,7 +99,7 @@ function authorized(header, token) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
-export function createRelay(config, log = console, { fetch } = {}) {
+export function createRelay(config, log = console, { fetch, faceDetector = createFaceDetector({ log }) } = {}) {
   let active, controls;
   let state = { deviceConnected: false, apiReady: false, activity: 'offline', micFrames: 0,
     playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
@@ -106,13 +108,14 @@ export function createRelay(config, log = console, { fetch } = {}) {
   const deviceConfig = () => {
     const settings = publicSettings(config);
     return { type: 'device_config', volume: settings.speakerVolume, brightness: settings.screenBrightness,
-      nod: settings.headNod, nodAngle: settings.nodAngle, nodPeriod: settings.nodPeriodMs };
+      nod: settings.headNod, nodAngle: settings.nodAngle, nodPeriod: settings.nodPeriodMs,
+      track: settings.faceTracking, reverseX: settings.trackReverseX, reverseY: settings.trackReverseY };
   };
   const dashboard = dashboardHandler({
     config: () => config,
     status: () => ({ ...state,
       activity: state.activity === 'listening' && Date.now() - state.lastMicAt > 1500 ? 'idle' : state.activity,
-      lastError, device: deviceInfo, wifi: wifiChange, model: config.model || 'gpt-realtime-2.1-mini',
+      lastError, device: deviceInfo, wifi: wifiChange, faceDetector: faceDetector.state, model: config.model || 'gpt-realtime-2.1-mini',
       protocol: config.protocol || 'realtime', uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }),
     save: async update => {
       const next = withSettings(config, update);
@@ -148,7 +151,8 @@ export function createRelay(config, log = console, { fetch } = {}) {
     res.writeHead(req.url === '/healthz' ? 200 : 404, { 'Content-Type': 'text/plain' });
     res.end(req.url === '/healthz' ? 'ok\n' : 'not found\n');
   });
-  const devices = new WebSocketServer({ noServer: true, maxPayload: 2048, perMessageDeflate: false });
+  // Larger than audio frames to admit camera snapshots for face tracking.
+  const devices = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false });
   http.on('upgrade', (req, socket, head) => {
     if (req.url !== '/device' || !authorized(req.headers.authorization, config.token)) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
@@ -172,7 +176,7 @@ export function createRelay(config, log = console, { fetch } = {}) {
       log.info?.(`GPT-Live final session seconds: ${Number(usage?.seconds || 0)}`);
     });
     let ready = false, busy = false, started = false, ending = false, endSent = false;
-    let queuedBytes = 0, inFlight = 0, closed = false;
+    let queuedBytes = 0, inFlight = 0, closed = false, detecting = false;
     const queue = [], sentSizes = [];
     let cloudAlive = true, deviceAlive = true;
     let lastProgress = Date.now();
@@ -242,6 +246,16 @@ export function createRelay(config, log = console, { fetch } = {}) {
 
     device.on('message', (data, binary) => {
       if (closed) return;
+      if (binary && data.length !== CHUNK && data.subarray(0, 4).toString('latin1') === 'FRM1') {
+        // Camera snapshot: one at a time, answered with the largest face, if any.
+        if (detecting || !publicSettings(config).faceTracking) return toDevice({ type: 'face', found: false });
+        detecting = true;
+        faceDetector.detect(data.subarray(4)).then(face => {
+          detecting = false;
+          if (!closed) toDevice(face.found ? { type: 'face', found: true, x: +face.x.toFixed(3), y: +face.y.toFixed(3) } : { type: 'face', found: false });
+        });
+        return;
+      }
       if (binary) {
         if (data.length !== CHUNK) return fail('invalid_microphone_chunk');
         if (ready && !busy) {
@@ -259,7 +273,9 @@ export function createRelay(config, log = console, { fetch } = {}) {
         const integer = value => Number.isInteger(value) ? value : null;
         deviceInfo = { ssid: text(message.ssid, 32), ip: text(message.ip, 45), rssi: integer(message.rssi),
           savedNetwork: message.savedNetwork === true, storage: message.storage === true,
-          volume: integer(message.volume), brightness: integer(message.brightness), at: Date.now() };
+          volume: integer(message.volume), brightness: integer(message.brightness),
+          camera: ['off', 'unavailable', 'searching', 'face'].includes(message.camera) ? message.camera : null,
+          cameraStackFree: integer(message.cameraStackFree), reset: text(message.reset, 24), at: Date.now() };
         return;
       }
       if (message?.type === 'wifi_result') {
@@ -364,6 +380,7 @@ export function createRelay(config, log = console, { fetch } = {}) {
     close: () => new Promise(resolve => {
       for (const device of devices.clients) device.terminate();
       devices.close();
+      faceDetector.close();
       http.close(resolve);
     }),
   };
