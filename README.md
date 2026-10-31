@@ -130,7 +130,7 @@ credentials remain exclusively in `.env`. Discard reverts unsaved form edits.
 API are ready and no reply is playing. **New conversation** reconnects without
 changing preferences. The status panel shows actual connection state and queued
 audio. A microphone marked idle may be muted on the robot; tap its screen to
-unmute.
+unmute. The robot starts muted after every boot or reflash.
 
 The **Robot** section sets speaker volume and screen brightness; these apply
 immediately without a new conversation and are re-sent whenever the robot

@@ -35,7 +35,8 @@ static bool prebuffered = false;
 static uint32_t firstAudioAt = 0;
 static uint16_t packetLengths[16];
 static size_t packetRead = 0, packetWrite = 0, packetCount = 0;
-static bool ready = false, output = false, outputDone = false, muted = false;
+// Start muted after every boot or reflash; tap the screen to unmute.
+static bool ready = false, output = false, outputDone = false, muted = true;
 static bool fault = false;
 static String expression = "neutral";
 static String status = "Joining Wi-Fi";
