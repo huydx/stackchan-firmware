@@ -15,6 +15,7 @@
       <a href="#turns"><span>03</span> Conversation</a>
       <a href="#advanced"><span>04</span> Tools & limits</a>
       <a href="#robot"><span>05</span> Robot</a>
+      <a href="#vision"><span>06</span> Face tracking</a>
     </nav>
     <div class="sidebar-bottom"><span class="tiny-dot"></span> Local control room<p>Settings stay on this Mac.<br>API keys stay on the relay.</p></div>
   </aside>
@@ -114,6 +115,23 @@
             <div class="wifi-actions"><button type="button" id="wifiSwitchButton" class="button secondary" disabled>Switch network</button><button type="button" id="wifiBuiltinButton" class="button secondary" hidden>Use built-in network</button></div>
             <div id="wifiNotice" class="notice" hidden></div>
             <p class="footnote">The robot saves a new network only after it reaches this relay through it, and returns to the previous one within 30 seconds if it can't. Use a 2.4 GHz network on the same LAN as this Mac. The password goes straight to the robot over your local network and isn't stored on this Mac.</p>
+          </div>
+        </section>
+        <section class="card tracker" id="vision" aria-labelledby="visionTitle">
+          <div class="section-heading"><div><p class="eyebrow">06 / FACE TRACKING</p><h2 id="visionTitle">What is it looking at?</h2></div><span id="trackerChip" class="tracker-chip">Waiting</span></div>
+          <p class="help">The tracking state machine, live from the robot. The camera view stays on this Mac.</p>
+          <div class="tracker-panel">
+            <figure class="tracker-graph"><svg id="stateGraph" viewBox="0 0 560 250" role="img" aria-labelledby="graphTitle"><title id="graphTitle">Face tracking state machine; the glowing state is current</title></svg></figure>
+            <figure class="tracker-camera">
+              <div class="camera-frame"><img id="cameraView" alt="Latest camera snapshot from the robot" hidden><svg id="cameraOverlay" viewBox="0 0 320 240" aria-hidden="true"></svg><span id="cameraEmpty" class="camera-empty">No snapshot yet</span></div>
+              <figcaption class="camera-meta"><span id="faceReadout">No face</span><span id="detectRate">—</span></figcaption>
+            </figure>
+            <div class="tracker-dials">
+              <figure><svg id="yawDial" viewBox="0 0 220 128" role="img" aria-label="Head yaw, seen from above"></svg><figcaption>Turn · seen from above</figcaption></figure>
+              <figure><svg id="pitchDial" viewBox="0 0 150 128" role="img" aria-label="Head pitch, seen from the side"></svg><figcaption>Tilt · seen from the side</figcaption></figure>
+              <div class="tracker-explain"><strong id="explainTitle">Waiting for the robot</strong><p id="explainText">The tracking state appears once the robot is connected.</p></div>
+            </div>
+            <div class="tracker-timeline"><div class="timeline-head"><span>LAST 60 SECONDS</span><span class="timeline-key"><i></i> face detected</span></div><svg id="timeline" viewBox="0 0 600 30" preserveAspectRatio="none" aria-hidden="true"></svg><div id="timelineLegend" class="timeline-legend"></div></div>
           </div>
         </section>
         <div class="savebar"><div><span id="dirtyDot" class="dirty-dot"></span><strong id="saveState">Loading settings…</strong><small>Robot settings apply instantly; other changes start a new conversation.</small></div><div class="save-actions"><button type="button" id="discardButton" class="button secondary" disabled>Discard</button><button id="saveButton" class="button primary" type="submit" disabled>Save & apply <span aria-hidden="true">↗</span></button></div></div>

@@ -27,4 +27,13 @@ int main() {
     assert(scsGoalPosition(packet, 2, 652, 50) == sizeof goal && !memcmp(packet, goal, sizeof goal));
     const uint8_t torque[] = {0xff, 0xff, 0x02, 0x04, 0x03, 0x28, 0x00, 0xce};
     assert(scsTorque(packet, 2, false) == sizeof torque && !memcmp(packet, torque, sizeof torque));
+
+    // Position read request, and parsing a reply after an echoed request.
+    const uint8_t read[] = {0xff, 0xff, 0x02, 0x04, 0x02, 0x38, 0x02, 0xbd};
+    assert(scsReadPosition(packet, 2) == sizeof read && !memcmp(packet, read, sizeof read));
+    const uint8_t bus[] = {0xff, 0xff, 0x02, 0x04, 0x02, 0x38, 0x02, 0xbd,   // echo
+                           0xff, 0xff, 0x02, 0x04, 0x00, 0x02, 0x6c, 0x8b};  // reply: 620
+    assert(scsParsePosition(bus, sizeof bus, 2) == 620);
+    assert(scsParsePosition(bus, 8, 2) == -1);
+    assert(scsParsePosition(bus, sizeof bus, 1) == -1);
 }

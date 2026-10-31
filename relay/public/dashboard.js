@@ -209,3 +209,200 @@ async function init() {
   } catch (error) { $('pageError').hidden = false; $('pageError').textContent = `Couldn't load the dashboard: ${error.message}`; }
 }
 init();
+
+// ---- Face tracking panel ----------------------------------------------------
+const SVG = 'http://www.w3.org/2000/svg';
+const svgEl = (parent, tag, attrs = {}, text) => {
+  const el = document.createElementNS(SVG, tag);
+  for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+  if (text != null) el.textContent = text;
+  parent.appendChild(el);
+  return el;
+};
+const MODES = {
+  resting: ['Resting', 'Home pose, servos relaxed. A voice starts a search (not within 30 s of giving up); a face in view starts centering right away.'],
+  searching: ['Searching', 'Sweeping ±50° at 12°/s on two heights, for up to 20 s. A face starts centering; nothing found means giving up.'],
+  centering: ['Centering', 'Turning toward the face for 5–10 s, measured from where each snapshot was taken, even through missed detections. Locks once centered after 5 s, or at 10 s.'],
+  locked: ['Locked on', 'Staying with the face, correcting only outside the center dead zone. If the face is gone for 3 s, it searches again.'],
+  givingup: ['Giving up', 'A 20 s search found nobody, so the head is returning to its home pose before resting.'],
+  waking: ['Waking', 'Servo power is cycling; the servos take about a second to boot before they accept commands.'],
+  look: ['Look test', 'A manual look command from the admin API is pointing the head for a few seconds.'],
+  testing: ['Self-test', 'The servo self-test is running; automatic motion is paused.'],
+  off: ['Off', 'Face tracking is switched off in Robot settings. The head only nods while speaking.'],
+  unavailable: ['Unavailable', 'The body controller or servos are not available, so the head cannot move.'],
+};
+const CORE = { resting: [70, 130], searching: [215, 45], centering: [395, 45], locked: [495, 150], givingup: [215, 212] };
+const EDGES = [
+  ['resting', 'searching', 'M88 112 Q110 55 162 45', [104, 70], 'voice heard'],
+  ['searching', 'centering', 'M267 45 L342 45', [305, 37], 'face found'],
+  ['centering', 'locked', 'M440 60 Q480 85 492 132', [496, 92], '5–10 s'],
+  ['locked', 'searching', 'M446 158 Q330 150 236 63', [350, 146], 'gone 3 s'],
+  ['searching', 'givingup', 'M206 63 L206 194', [172, 130], '20 s, none'],
+  ['givingup', 'resting', 'M163 215 Q95 212 74 149', [100, 206], 'home'],
+  ['resting', 'centering', 'M118 140 Q260 115 360 62', [262, 118], 'face seen'],
+];
+const tracker = { built: false, nodes: {}, edges: [], mode: null, firedTimer: 0, polling: false, visible: false, lastImageAt: 0 };
+
+function buildTracker() {
+  const graph = $('stateGraph');
+  const defs = svgEl(graph, 'defs');
+  const glow = svgEl(defs, 'filter', { id: 'tracker-glow', x: '-50%', y: '-50%', width: '200%', height: '200%' });
+  svgEl(glow, 'feGaussianBlur', { stdDeviation: '3', result: 'blur' });
+  const merge = svgEl(glow, 'feMerge');
+  svgEl(merge, 'feMergeNode', { in: 'blur' });
+  svgEl(merge, 'feMergeNode', { in: 'SourceGraphic' });
+  const marker = svgEl(defs, 'marker', { id: 'tracker-arrow', viewBox: '0 0 8 8', refX: '7', refY: '4', markerWidth: '6', markerHeight: '6', orient: 'auto' });
+  svgEl(marker, 'path', { d: 'M0 0 L8 4 L0 8 z', fill: '#5d8278' });
+  for (const [from, to, d, [lx, ly], label] of EDGES) {
+    const group = svgEl(graph, 'g', { class: 'edge' });
+    svgEl(group, 'path', { d, 'marker-end': 'url(#tracker-arrow)' });
+    svgEl(group, 'text', { x: lx, y: ly, 'text-anchor': 'middle' }, label);
+    tracker.edges.push({ from, to, group });
+  }
+  for (const [mode, [x, y]] of Object.entries(CORE)) {
+    const group = svgEl(graph, 'g', { class: 'node' });
+    group.style.setProperty('--accent', `var(--m-${mode})`);
+    svgEl(group, 'rect', { class: 'ring', x: x - 50, y: y - 17, width: 100, height: 34, rx: 17 });
+    svgEl(group, 'rect', { x: x - 50, y: y - 17, width: 100, height: 34, rx: 17 });
+    svgEl(group, 'text', { x, y }, MODES[mode][0].toUpperCase());
+    tracker.nodes[mode] = group;
+  }
+  tracker.aux = svgEl(graph, 'g', { class: 'aux-pill' });
+  tracker.auxRect = svgEl(tracker.aux, 'rect', { x: 8, y: 8, width: 120, height: 24, rx: 12 });
+  tracker.auxText = svgEl(tracker.aux, 'text', { x: 68, y: 20 });
+  tracker.aux.setAttribute('display', 'none');
+
+  const overlay = $('cameraOverlay');
+  svgEl(overlay, 'line', { class: 'overlay-guide', x1: 160, y1: 0, x2: 160, y2: 240 });
+  svgEl(overlay, 'line', { class: 'overlay-guide', x1: 0, y1: 120, x2: 320, y2: 120 });
+  svgEl(overlay, 'rect', { class: 'overlay-zone', x: 144, y: 108, width: 32, height: 24 });
+  tracker.faceLine = svgEl(overlay, 'line', { class: 'overlay-line', x1: 160, y1: 120, x2: 160, y2: 120 });
+  tracker.faceBox = svgEl(overlay, 'rect', { class: 'overlay-face', x: 0, y: 0, width: 0, height: 0, rx: 4 });
+
+  // Yaw: top-down, robot facing up; positive yaw is the robot's left (screen left).
+  const yaw = $('yawDial'), yc = [110, 112], yr = 88;
+  const yawPoint = (deg, r = yr) => [yc[0] - r * Math.sin(deg * Math.PI / 180), yc[1] - r * Math.cos(deg * Math.PI / 180)];
+  const arc = (from, to, point) => { const [a, b] = [point(from), point(to)]; return `M${a[0]} ${a[1]} A${yr} ${yr} 0 0 ${from > to ? 1 : 0} ${b[0]} ${b[1]}`; };
+  svgEl(yaw, 'path', { class: 'dial-track', d: arc(70, -70, yawPoint) });
+  tracker.yawSweep = svgEl(yaw, 'path', { class: 'dial-sweep', d: arc(50, -50, yawPoint), opacity: 0 });
+  for (const deg of [-60, -30, 0, 30, 60]) {
+    const [a, b] = [yawPoint(deg, yr - 9), yawPoint(deg, yr + 7)];
+    svgEl(yaw, 'line', { class: 'dial-tick', x1: a[0], y1: a[1], x2: b[0], y2: b[1] });
+  }
+  svgEl(yaw, 'text', { class: 'dial-label', x: 8, y: 124 }, 'ITS LEFT');
+  svgEl(yaw, 'text', { class: 'dial-label', x: 170, y: 124 }, 'ITS RIGHT');
+  tracker.yawTarget = svgEl(yaw, 'line', { class: 'dial-target', x1: yc[0], y1: yc[1], x2: yc[0], y2: yc[1] - yr });
+  tracker.yawNeedle = svgEl(yaw, 'line', { class: 'dial-needle', x1: yc[0], y1: yc[1], x2: yc[0], y2: yc[1] - yr + 6 });
+  svgEl(yaw, 'circle', { class: 'dial-hub', cx: yc[0], cy: yc[1], r: 5 });
+  tracker.yawValue = svgEl(yaw, 'text', { class: 'dial-value', x: yc[0], y: yc[1] - 26 }, '0°');
+  tracker.yawPoint = yawPoint;
+
+  // Pitch: side view, facing right; 0° level, up to 45°.
+  const pitch = $('pitchDial'), pc = [22, 112], pr = 100;
+  const pitchPoint = (deg, r = pr) => [pc[0] + r * Math.cos(deg * Math.PI / 180), pc[1] - r * Math.sin(deg * Math.PI / 180)];
+  const [p0, p1] = [pitchPoint(0), pitchPoint(45)];
+  svgEl(pitch, 'path', { class: 'dial-track', d: `M${p0[0]} ${p0[1]} A${pr} ${pr} 0 0 0 ${p1[0]} ${p1[1]}` });
+  for (const deg of [0, 15, 30, 45]) {
+    const [a, b] = [pitchPoint(deg, pr - 9), pitchPoint(deg, pr + 7)];
+    svgEl(pitch, 'line', { class: 'dial-tick', x1: a[0], y1: a[1], x2: b[0], y2: b[1] });
+  }
+  svgEl(pitch, 'text', { class: 'dial-label', x: 100, y: 124 }, 'LEVEL');
+  tracker.pitchTarget = svgEl(pitch, 'line', { class: 'dial-target', x1: pc[0], y1: pc[1], x2: p0[0], y2: p0[1] });
+  tracker.pitchNeedle = svgEl(pitch, 'line', { class: 'dial-needle', x1: pc[0], y1: pc[1], x2: p0[0] - 6, y2: p0[1] });
+  svgEl(pitch, 'circle', { class: 'dial-hub', cx: pc[0], cy: pc[1], r: 5 });
+  tracker.pitchValue = svgEl(pitch, 'text', { class: 'dial-value', x: 70, y: 62 }, '0°');
+  tracker.pitchPoint = pitchPoint;
+
+  $('timelineLegend').replaceChildren(...['resting', 'searching', 'centering', 'locked', 'givingup'].map(mode => {
+    const item = document.createElement('span');
+    item.style.setProperty('--swatch', `var(--m-${mode})`);
+    item.textContent = MODES[mode][0];
+    return item;
+  }));
+  tracker.built = true;
+}
+
+const setLine = (line, [x, y]) => { line.setAttribute('x2', x.toFixed(1)); line.setAttribute('y2', y.toFixed(1)); };
+
+function renderTracker(data) {
+  const panel = $('vision');
+  const head = data.connected && data.head && Date.now() - data.head.at < 3000 ? data.head : null;
+  const mode = !data.connected ? null : head ? head.mode : data.enabled === false ? 'off' : 'waking';
+  panel.style.setProperty('--accent', mode ? `var(--m-${mode})` : 'var(--m-off)');
+  $('trackerChip').textContent = !mode ? 'Robot offline' : MODES[mode][0] + (head?.nod ? ' · nodding' : '');
+  $('explainTitle').textContent = mode ? MODES[mode][0] : 'Robot offline';
+  $('explainText').textContent = mode ? MODES[mode][1] : 'Connect the robot to see its tracking state.';
+
+  for (const [name, node] of Object.entries(tracker.nodes)) node.classList.toggle('active', name === mode);
+  const aux = mode && !CORE[mode];
+  tracker.aux.setAttribute('display', aux ? 'inline' : 'none');
+  if (aux) tracker.auxText.textContent = MODES[mode][0].toUpperCase();
+  if (mode !== tracker.mode) {
+    // Light up the transition just taken.
+    for (const edge of tracker.edges) edge.group.classList.toggle('fired', edge.from === tracker.mode && edge.to === mode);
+    clearTimeout(tracker.firedTimer);
+    tracker.firedTimer = setTimeout(() => tracker.edges.forEach(edge => edge.group.classList.remove('fired')), 2500);
+    tracker.mode = mode;
+  }
+
+  // Gaze dials (tenths of a degree from the robot).
+  const yaw = (head?.yaw ?? 0) / 10, pitch = (head?.pitch ?? 0) / 10;
+  setLine(tracker.yawNeedle, tracker.yawPoint(yaw, 82));
+  setLine(tracker.yawTarget, tracker.yawPoint(mode === 'searching' ? yaw : (head?.targetYaw ?? 0) / 10, 94));
+  tracker.yawSweep.setAttribute('opacity', mode === 'searching' ? 1 : 0);
+  tracker.yawValue.textContent = `${Math.round(Math.abs(yaw))}°${yaw > 0.5 ? ' L' : yaw < -0.5 ? ' R' : ''}`;
+  setLine(tracker.pitchNeedle, tracker.pitchPoint(pitch, 94));
+  setLine(tracker.pitchTarget, tracker.pitchPoint(mode === 'searching' ? pitch : (head?.targetPitch ?? 0) / 10, 106));
+  tracker.pitchValue.textContent = `${Math.round(pitch)}°`;
+
+  // Camera overlay: face box in a 320x240 frame.
+  const face = data.face;
+  const fresh = face?.found && Date.now() - face.at < 1500;
+  $('cameraView').closest('.camera-frame').classList.toggle('searching', mode === 'searching');
+  if (face?.found && Number.isFinite(face.w)) {
+    const cx = (face.x + 1) * 160, cy = (face.y + 1) * 120, w = face.w * 320, h = face.h * 240;
+    Object.entries({ x: cx - w / 2, y: cy - h / 2, width: w, height: h }).forEach(([k, v]) => tracker.faceBox.setAttribute(k, v.toFixed(1)));
+    tracker.faceLine.setAttribute('x2', cx.toFixed(1));
+    tracker.faceLine.setAttribute('y2', cy.toFixed(1));
+    $('faceReadout').textContent = `${fresh ? 'Face' : 'Last face'}  x ${face.x >= 0 ? '+' : ''}${face.x.toFixed(2)}  y ${face.y >= 0 ? '+' : ''}${face.y.toFixed(2)}`;
+  } else $('faceReadout').textContent = 'No face';
+  tracker.faceBox.classList.toggle('stale', !fresh);
+  tracker.faceBox.setAttribute('opacity', face?.found ? 1 : 0);
+  tracker.faceLine.setAttribute('opacity', fresh ? 1 : 0);
+  const found = (data.detections || []).filter(entry => Date.now() - entry.at < 10000);
+  $('detectRate').textContent = found.length ? `${Math.round(100 * found.filter(entry => entry.found).length / found.length)}% detected · 10 s` : data.detector === 'unavailable' ? 'detector unavailable' : '—';
+  if (face && face.at !== tracker.lastImageAt) {
+    tracker.lastImageAt = face.at;
+    const image = $('cameraView');
+    image.onload = () => { image.hidden = false; $('cameraEmpty').hidden = true; };
+    image.src = `/api/admin/camera?t=${face.at}`;
+  }
+
+  // Timeline: state bands over the last 60 s, with detection ticks.
+  const timeline = $('timeline'), now = Date.now(), span = 60000, toX = at => Math.max(0, 600 - (now - at) / span * 600);
+  timeline.replaceChildren();
+  const history = data.connected ? data.history || [] : [];
+  history.forEach((entry, index) => {
+    const end = history[index + 1]?.at ?? now;
+    if (now - end > span) return;
+    const x = toX(entry.at), rect = svgEl(timeline, 'rect', { x, y: 6, width: Math.max(1, toX(end) - x), height: 24 });
+    rect.style.fill = `var(--m-${entry.mode})`;
+    rect.style.opacity = '.85';
+  });
+  for (const entry of data.detections || []) {
+    if (entry.found && now - entry.at < span) svgEl(timeline, 'rect', { x: toX(entry.at), y: 0, width: 1.5, height: 5, fill: '#6ee7a8' });
+  }
+}
+
+async function pollTracker() {
+  if (tracker.polling || !tracker.visible || document.hidden) return;
+  tracker.polling = true;
+  try { renderTracker(await api('tracking')); }
+  catch { renderTracker({ connected: false }); }
+  finally { tracker.polling = false; }
+}
+
+buildTracker();
+new IntersectionObserver(entries => { tracker.visible = entries.some(entry => entry.isIntersecting); if (tracker.visible) pollTracker(); })
+  .observe($('vision'));
+setInterval(pollTracker, 300);

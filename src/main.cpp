@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <atomic>
 #include <nvs.h>
+#include <driver/uart.h>
 #include "playback_pool.h"
 #include "body_lights.h"
 #include "head_nod.h"
@@ -47,7 +48,12 @@ static int nodAmplitude = 60;  // tenths of a degree
 static uint32_t nodPeriod = 2400;
 static int pitchZero = PITCH_DEFAULT_ZERO, yawZero = YAW_DEFAULT_ZERO;
 static bool trackEnabled = true, reverseX = false, reverseY = false, frameInFlight = false;
-static uint32_t frameSentAt = 0;
+static uint32_t frameSentAt = 0, lookUntil = 0;
+// Gaze of the snapshot in flight, of the latest face result, and of a look test.
+static Gaze frameGaze, faceGaze, lookGaze;
+static char servoTestLog[400] = "";
+static bool servoTestPending = false;
+static uint32_t servoTestUntil = 0;
 
 // A new network is kept only after it reaches the relay (or, at boot, joins
 // Wi-Fi) within 30 s; otherwise the previous network is restored.
@@ -122,6 +128,8 @@ static bool storeWifi(bool forget) {
     return error == ESP_OK;
 }
 
+static void addHeadStatus(JsonDocument &doc);
+
 static void sendDeviceStatus() {
     JsonDocument doc;
     doc["type"] = "device_status";
@@ -134,6 +142,7 @@ static void sendDeviceStatus() {
     doc["brightness"] = M5.Display.getBrightness();
     doc["camera"] = faceCameraState();
     doc["cameraStackFree"] = faceCameraStackFree();
+    addHeadStatus(doc);
     // Why the robot last started, to diagnose crashes without the USB port.
     static const char *const reasons[] = {"unknown", "power_on", "external", "software", "panic", "interrupt_watchdog",
                                           "task_watchdog", "watchdog", "deep_sleep", "brownout", "sdio", "usb", "jtag"};
@@ -252,7 +261,19 @@ static void onSocket(WStype_t type, uint8_t *data, size_t length) {
             nextDeviceStatus = 0;
         } else if (!strcmp(event, "face")) {
             frameInFlight = false;
-            if (doc["found"] | false) faceCameraSetFace(doc["x"] | 0.0f, doc["y"] | 0.0f);
+            if (doc["found"] | false) {
+                faceGaze = frameGaze;
+                faceCameraSetFace(doc["x"] | 0.0f, doc["y"] | 0.0f);
+            }
+        } else if (!strcmp(event, "servo_test")) {
+            servoTestPending = true;
+            servoTestUntil = millis() + 8000;
+            strlcpy(servoTestLog, "pending", sizeof servoTestLog);
+        } else if (!strcmp(event, "look")) {
+            // Point the head for a few seconds (dashboard direction check).
+            lookGaze.yaw = clampInt(doc["yaw"] | 0, -TRACK_YAW_LIMIT, TRACK_YAW_LIMIT);
+            lookGaze.pitch = clampInt(doc["pitch"] | 0, 0, TRACK_PITCH_LIMIT);
+            lookUntil = millis() + 4000;
         } else if (!strcmp(event, "wifi_set") && trial == Trial::None && requested == Trial::None) {
             // Switch networks from loop(), not from inside the socket callback.
             const char *ssid = doc["ssid"] | "";
@@ -333,6 +354,11 @@ static uint8_t lightAttempts = 0, lightFailures = 0;
 static uint32_t nextLightAt = 0;
 static int32_t lightColor = -1;
 
+static bool bodyPinReadsHigh() {  // expander pin 0 output (VM_EN)
+    uint8_t value;
+    return M5.In_I2C.readRegister(BODY_ADDR, 0x05, &value, 1, BODY_I2C_HZ) && (value & 0x01);
+}
+
 // Low registers hold expander pins 0-7, high registers pins 8-15.
 static bool bodyPinBit(uint8_t reg, uint8_t mask, bool set) {
     uint8_t value;
@@ -392,20 +418,77 @@ static void updateBodyLights() {
 }
 
 // Head servos on the body's SCS bus (UART1, TX 6 / RX 7, 1 Mbaud): pitch
-// nods while speaking; with face tracking on, yaw and pitch turn toward the
-// nearest face. Yaw is only commanded when tracking is on. Like the official
-// firmware, torque is released at rest so the head is not held.
+// nods while speaking. With face tracking on, the head searches for a face
+// while a conversation is active, then keeps it centered in the camera image.
+// Yaw is only commanded when tracking is on. Like the official firmware,
+// torque is released at rest so the head is not held.
 enum class Servos : uint8_t { Off, Powering, Ready, Unavailable };
 static Servos servos = Servos::Off;
 static bool torqueOn = false;
 static Gaze gazeTarget, gazeNow;
+static Search search;
+static uint8_t centeredHits = 0, offCenterHits = 0;
+enum class Track : uint8_t { Resting, Searching, Centering, Locked, GivingUp };
+static Track track = Track::Searching;  // look around once after boot
+static uint32_t trackSince = 0, gaveUpAt = 0;
+
+static void setTrack(Track next, uint32_t now) {
+    track = next;
+    trackSince = now;
+    if (next == Track::Centering) centeredHits = offCenterHits = 0;
+}
 static int sentYaw = INT32_MIN, sentPitch = INT32_MIN;
 static float nodScale = 0;
-static uint32_t servoAt = 0, nodStart = 0, nextHeadAt = 0, lastFaceAt = 0, restingSince = 0;
+static uint32_t servoAt = 0, nodStart = 0, nextHeadAt = 0, lastFaceAt = 0, restingSince = 0, torqueFailingSince = 0;
+static int servoPowerCycles = 0;
+// Face tracking state for the dashboard: the mode name and the last sighting.
+static const char *headMode = "resting";
+static float lastFaceX = 0, lastFaceY = 0;
+static uint32_t nextHeadReport = 0;
 
-static void servoSend(const uint8_t *packet, size_t length) {
-    while (Serial1.available()) Serial1.read();  // status replies are not needed
-    Serial1.write(packet, length);
+// Like StackChan-BSP, drive UART1 through the ESP-IDF driver and wait for
+// each servo's status reply before the next packet: the bus is half duplex,
+// and a packet sent during a reply collides with it and is lost.
+static constexpr uart_port_t SERVO_UART = UART_NUM_1;
+
+static bool servoBusBegin() {
+    uart_config_t config = {};
+    config.baud_rate = 1000000;
+    config.data_bits = UART_DATA_8_BITS;
+    config.parity = UART_PARITY_DISABLE;
+    config.stop_bits = UART_STOP_BITS_1;
+    config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    config.source_clk = UART_SCLK_APB;
+    return uart_driver_install(SERVO_UART, 1024, 1024, 0, nullptr, 0) == ESP_OK &&
+           uart_param_config(SERVO_UART, &config) == ESP_OK &&
+           uart_set_pin(SERVO_UART, 6, 7, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) == ESP_OK;
+}
+
+// Sends one packet and collects the reply: 6 bytes for writes, 8 for a
+// two-byte read. Returns the number of reply bytes received.
+static size_t servoTransact(const uint8_t *packet, size_t length, uint8_t *reply, size_t replyLength) {
+    uart_flush_input(SERVO_UART);
+    uart_write_bytes(SERVO_UART, packet, length);
+    uart_wait_tx_done(SERVO_UART, pdMS_TO_TICKS(5));
+    // Idle servos answer within a few milliseconds (2 ms was too short);
+    // moving ones may not answer at all.
+    const int received = uart_read_bytes(SERVO_UART, reply, replyLength, pdMS_TO_TICKS(6));
+    return received > 0 ? received : 0;
+}
+
+static char lastWriteReply[40] = "", lastReadReply[40] = "";
+
+static void hexBytes(char *out, size_t size, const uint8_t *data, size_t length) {
+    out[0] = 0;
+    for (size_t i = 0; i < length && 3 * i + 3 < size; ++i) snprintf(out + 3 * i, 4, "%02x ", data[i]);
+}
+
+// Returns true when the servo acknowledged the write without an error.
+static bool servoSend(const uint8_t *packet, size_t length) {
+    uint8_t reply[6];
+    const size_t received = servoTransact(packet, length, reply, sizeof reply);
+    hexBytes(lastWriteReply, sizeof lastWriteReply, reply, received);
+    return received == sizeof reply && reply[0] == 0xff && reply[1] == 0xff && reply[2] == packet[2] && reply[4] == 0;
 }
 
 static void moveServo(uint8_t id, int raw, uint16_t timeMs) {
@@ -413,49 +496,244 @@ static void moveServo(uint8_t id, int raw, uint16_t timeMs) {
     servoSend(packet, scsGoalPosition(packet, id, raw, timeMs));
 }
 
-static void setTorque(bool enabled) {
+// Torque counts as on only when the servos acknowledge it: a command sent
+// while a servo is still booting is silently lost, and without torque every
+// position command is ignored. Callers retry until this returns true.
+static bool setTorque(bool enabled) {
     uint8_t packet[16];
-    servoSend(packet, scsTorque(packet, PITCH_SERVO_ID, enabled));
-    if (trackEnabled || !enabled) servoSend(packet, scsTorque(packet, YAW_SERVO_ID, enabled));
-    torqueOn = enabled;
+    bool acknowledged = servoSend(packet, scsTorque(packet, PITCH_SERVO_ID, enabled));
+    if (trackEnabled || !enabled) acknowledged &= servoSend(packet, scsTorque(packet, YAW_SERVO_ID, enabled));
+    torqueOn = enabled && acknowledged;
     sentYaw = sentPitch = INT32_MIN;
+    return acknowledged;
+}
+
+// Servo read-back for diagnostics: proves bus, power and servo respond.
+static int servoPosition[2] = {-1, -1};  // yaw, pitch raw positions
+static int supplyMillivolts = -1, supplyMilliamps = 0, vmEnable = -1, servoRxBytes = -1;
+static uint32_t nextServoRead = 0;
+static int servoVolts[2] = {-1, -1};  // tenths of a volt, from each servo
+static bool extOutput = false;
+static int vbusMillivolts = -1, extRetries = 0;
+
+// Reads one byte register; returns -1 without a valid reply (FF FF id 03 err value checksum).
+static int readServoByte(uint8_t id, uint8_t address) {
+    const uint8_t request[8] = {0xff, 0xff, id, 4, 0x02, address, 1, uint8_t(~uint8_t(id + 4 + 0x02 + address + 1))};
+    uint8_t reply[7];
+    if (servoTransact(request, sizeof request, reply, sizeof reply) != sizeof reply) return -1;
+    if (reply[0] != 0xff || reply[1] != 0xff || reply[2] != id || reply[3] != 3) return -1;
+    return uint8_t(~uint8_t(reply[2] + reply[3] + reply[4] + reply[5])) == reply[6] ? reply[5] : -1;
+}
+
+static int readServoPosition(uint8_t id) {
+    uint8_t packet[8], reply[8];
+    const size_t length = servoTransact(packet, scsReadPosition(packet, id), reply, sizeof reply);
+    servoRxBytes = length;
+    hexBytes(lastReadReply, sizeof lastReadReply, reply, length);
+    return scsParsePosition(reply, length, id);
+}
+
+// Self-test (admin API): servo settings, then a small pitch move, logged.
+
+static int readServoWord(uint8_t id, uint8_t address) {
+    const uint8_t request[8] = {0xff, 0xff, id, 4, 0x02, address, 2, uint8_t(~uint8_t(id + 4 + 0x02 + address + 2))};
+    uint8_t reply[8];
+    if (servoTransact(request, sizeof request, reply, sizeof reply) != sizeof reply) return -1;
+    if (reply[0] != 0xff || reply[1] != 0xff || reply[2] != id || reply[3] != 4) return -1;
+    if (uint8_t(~uint8_t(reply[2] + reply[3] + reply[4] + reply[5] + reply[6])) != reply[7]) return -1;
+    return reply[5] << 8 | reply[6];
+}
+
+static void testLog(const char *format, ...) {
+    const size_t used = strlen(servoTestLog);
+    va_list args;
+    va_start(args, format);
+    vsnprintf(servoTestLog + used, sizeof servoTestLog - used, format, args);
+    va_end(args);
+}
+
+static void runServoTest() {
+    servoTestPending = false;
+    servoTestLog[0] = 0;
+    // Power-cycle the servos (VM_EN off, then on) to clear any latched fault.
+    const bool off = bodyPinBit(0x05, 0x01, false);
+    delay(600);
+    const bool on = bodyPinBit(0x05, 0x01, true);
+    delay(1500);  // the servos take about a second to boot
+    testLog("cycle %d%d ", int(off), int(on));
+    for (uint8_t id = 1; id <= 2; ++id) {
+        testLog("| id%d lim %d..%d tq %d pos %d v %d t %d ", id, readServoWord(id, 9), readServoWord(id, 11),
+            readServoByte(id, 40), readServoWord(id, 56), readServoByte(id, 62), readServoByte(id, 63));
+    }
+    uint8_t packet[16], reply[6];
+    const int start = readServoWord(PITCH_SERVO_ID, 56);
+    size_t got = servoTransact(packet, scsTorque(packet, PITCH_SERVO_ID, true), reply, sizeof reply);
+    testLog("| torque-on reply %d err %d ", int(got), got == 6 ? reply[4] : -1);
+    const int goal = start >= 0 ? start + 30 : pitchZero + 30;
+    got = servoTransact(packet, scsGoalPosition(packet, PITCH_SERVO_ID, goal, 500), reply, sizeof reply);
+    testLog("goal %d reply %d err %d ", goal, int(got), got == 6 ? reply[4] : -1);
+    // Position every 100 ms: a run of -1 right after the move starts means a brownout reset.
+    testLog("-> ");
+    for (int i = 0; i < 15; ++i) {
+        delay(100);
+        testLog("%d ", readServoWord(PITCH_SERVO_ID, 56));
+    }
+    testLog("tq %d ", readServoByte(PITCH_SERVO_ID, 40));
+    servoTransact(packet, scsGoalPosition(packet, PITCH_SERVO_ID, start >= 0 ? start : pitchZero, 500), reply, sizeof reply);
+    delay(700);
+    testLog("back %d", readServoWord(PITCH_SERVO_ID, 56));
+    servoTransact(packet, scsTorque(packet, PITCH_SERVO_ID, false), reply, sizeof reply);
+    torqueOn = false;
+    sentYaw = sentPitch = INT32_MIN;
+    Serial.printf("[bot] servo test: %s\n", servoTestLog);
+}
+
+static void readServos() {
+    if (servos != Servos::Ready || int32_t(millis() - nextServoRead) < 0) return;
+    nextServoRead = millis() + 3000;
+    servoPosition[0] = readServoPosition(YAW_SERVO_ID);
+    servoPosition[1] = readServoPosition(PITCH_SERVO_ID);
+    // The body's 5V comes from the CoreS3 boost output. M5Unified skips enabling
+    // it at boot when USB already drives the bus, and nothing re-enables it
+    // when that changes, which leaves the servos unpowered: keep it on.
+    extOutput = M5.Power.getExtOutput();
+    vbusMillivolts = int(M5.Power.getVBUSVoltage());
+    if (!extOutput) {
+        ++extRetries;
+        M5.Power.setExtOutput(true);  // refused by M5Unified when unsafe
+        extOutput = M5.Power.getExtOutput();
+    }
+    servoVolts[0] = readServoByte(YAW_SERVO_ID, 62);  // PRESENT_VOLTAGE
+    servoVolts[1] = readServoByte(PITCH_SERVO_ID, 62);
+    // Body INA226 (0x41, 10 mOhm shunt): supply voltage and current.
+    uint8_t value[2];
+    if (M5.In_I2C.readRegister(0x41, 0x02, value, 2, BODY_I2C_HZ)) supplyMillivolts = (value[0] << 8 | value[1]) * 5 / 4;
+    if (M5.In_I2C.readRegister(0x41, 0x01, value, 2, BODY_I2C_HZ)) supplyMilliamps = int16_t(value[0] << 8 | value[1]) / 4;
+    // Expander pin 0 (VM_EN): direction and output bits as the controller reports them.
+    uint8_t direction, level;
+    if (M5.In_I2C.readRegister(BODY_ADDR, 0x03, &direction, 1, BODY_I2C_HZ) &&
+        M5.In_I2C.readRegister(BODY_ADDR, 0x05, &level, 1, BODY_I2C_HZ)) vmEnable = (direction & 1) << 1 | (level & 1);
+}
+
+static void addHeadStatus(JsonDocument &doc) {
+    static const char *const bodyStates[] = {"probing", "ready", "unavailable"};
+    static const char *const servoStates[] = {"off", "powering", "ready", "unavailable"};
+    doc["body"] = bodyStates[int(lights)];
+    doc["servos"] = servoStates[int(servos)];
+    doc["servoYaw"] = servoPosition[0];
+    doc["servoPitch"] = servoPosition[1];
+    doc["commandYaw"] = sentYaw == INT32_MIN ? -1 : sentYaw;
+    doc["commandPitch"] = sentPitch == INT32_MIN ? -1 : sentPitch;
+    doc["supplyMv"] = supplyMillivolts;
+    doc["supplyMa"] = supplyMilliamps;
+    doc["vmEnable"] = vmEnable;
+    doc["powerCycles"] = servoPowerCycles;
+    doc["servoRxBytes"] = servoRxBytes;
+    doc["writeReply"] = lastWriteReply;
+    doc["servoVoltsYaw"] = servoVolts[0];
+    doc["extOutput"] = extOutput;
+    doc["servoTest"] = servoTestLog;
+    doc["vbusMv"] = vbusMillivolts;
+    doc["extRetries"] = extRetries;
+    doc["servoVoltsPitch"] = servoVolts[1];
+    doc["readReply"] = lastReadReply;
 }
 
 static void updateHead() {
     const uint32_t now = millis();
+    if (servoTestPending && servos == Servos::Ready) runServoTest();
+    // Hold still around a self-test, but let a pending one power the servos.
+    if (!servoTestPending && int32_t(servoTestUntil - now) > 0) {
+        headMode = "testing";
+        return;
+    }
+    if (lights == Lights::Unavailable || servos == Servos::Unavailable) headMode = "unavailable";
     if (lights != Lights::Ready || servos == Servos::Unavailable || int32_t(now - nextHeadAt) < 0) return;
     nextHeadAt = now + 50;
 
-    // Turn toward each new face sighting, measured from where the head is now.
+    // Tracking states: search up to 20 s, center a found face for 5-10 s,
+    // stay locked on while it is there, search again when it is gone, and
+    // give up (back to the home pose) when a search finds nothing.
+    const bool voice = output || microphonePeak.exchange(0) > 1500;
     float x, y;
     uint32_t age;
     if (trackEnabled && faceCameraLatest(x, y, age) && age < 1000 && now - age != lastFaceAt) {
+        // Center each new sighting, measured from where the snapshot was taken.
         lastFaceAt = now - age;
-        gazeTarget = gazeToward(gazeNow, x, y, reverseX, reverseY);
+        lastFaceX = x;
+        lastFaceY = y;
+        gazeTarget = gazeToward(faceGaze, x, y, reverseX, reverseY);
+        if (fabsf(x) <= 0.1f && fabsf(y) <= 0.1f) {
+            offCenterHits = 0;
+            ++centeredHits;
+        } else if (fabsf(x) > 0.18f || fabsf(y) > 0.18f) {
+            centeredHits = 0;
+            ++offCenterHits;
+        }
+        if (track != Track::Centering && track != Track::Locked) setTrack(Track::Centering, now);
     }
-    const bool tracking = trackEnabled && lastFaceAt && now - lastFaceAt < 10000;
-    if (!tracking) gazeTarget = Gaze();  // nobody seen for a while: face forward
+    const bool settled = gazeNow.yaw == gazeTarget.yaw && gazeNow.pitch == gazeTarget.pitch;
+    // Missed detections are normal (about three snapshots a second, blurred
+    // while turning): the face is gone only after 3 s and once settled.
+    const bool faceGone = now - lastFaceAt > 3000 && settled;
+    const uint32_t inState = now - trackSince;
+    if (!trackEnabled) {
+        if (track != Track::Resting) setTrack(Track::Resting, now);
+    } else if (track == Track::Resting) {
+        // A new conversation starts a search, but not right after giving up.
+        if (voice && (!gaveUpAt || now - gaveUpAt > 30000)) setTrack(Track::Searching, now);
+    } else if (track == Track::Searching) {
+        if (inState > 20000) {
+            gaveUpAt = now;
+            setTrack(Track::GivingUp, now);
+        }
+    } else if (track == Track::Centering) {
+        // Keep centering for 5-10 s even through missed detections, then lock.
+        if ((inState >= 5000 && centeredHits >= 2) || inState >= 10000) setTrack(Track::Locked, now);
+    } else if (track == Track::Locked) {
+        if (faceGone) setTrack(Track::Searching, now);
+    } else if (track == Track::GivingUp) {
+        if (!gazeNow.yaw && !gazeNow.pitch) setTrack(Track::Resting, now);
+    }
+
+    const bool looking = int32_t(lookUntil - now) > 0;
+    const bool searching = !looking && track == Track::Searching;
+    if (looking) gazeTarget = lookGaze;
+    else if (track == Track::Resting || track == Track::GivingUp || searching) gazeTarget = Gaze();
     const bool speaking = nodEnabled && output;
     if (speaking && nodScale == 0) nodStart = now;
     nodScale = speaking ? min(1.0f, nodScale + 0.1f) : max(0.0f, nodScale - 0.1f);
-    const bool active = tracking || nodScale > 0 || gazeNow.yaw || gazeNow.pitch;
+    const bool active = looking || track != Track::Resting || servoTestPending || nodScale > 0 || gazeNow.yaw || gazeNow.pitch;
+    static const char *const trackNames[] = {"resting", "searching", "centering", "locked", "givingup"};
+    headMode = !trackEnabled && !looking ? "off"
+             : servos == Servos::Off || servos == Servos::Powering ? (active ? "waking" : "resting")
+             : looking ? "look" : trackNames[int(track)];
 
     if (servos == Servos::Off) {
         if (!active) return;
-        // Expander pin 0 enables servo power (VM_EN): output, pull-up, high.
+        // Expander pin 0 enables servo power (VM_EN): output, pull-up, then
+        // off and on again. A servo can be left unresponsive by an earlier
+        // session, and an ESP32 reset alone does not cut servo power.
         if (!bodyPinBit(0x03, 0x01, true) || !bodyPinBit(0x0b, 0x01, false) ||
-            !bodyPinBit(0x09, 0x01, true) || !bodyPinBit(0x05, 0x01, true)) {
+            !bodyPinBit(0x09, 0x01, true) || !bodyPinBit(0x05, 0x01, false)) {
             servos = Servos::Unavailable;
             Serial.println("[bot] servo power unavailable; head movement disabled");
             return;
         }
+        ++servoPowerCycles;
         servos = Servos::Powering;
-        servoAt = now + 250;
+        servoAt = now + 600;
         return;
     }
     if (servos == Servos::Powering) {
         if (int32_t(now - servoAt) < 0) return;
+        if (!torqueOn && !(bodyPinReadsHigh())) {
+            bodyPinBit(0x05, 0x01, true);  // power back on
+            servoAt = now + 1500;          // the servos take about a second to boot
+            return;
+        }
         servos = Servos::Ready;
+        torqueFailingSince = 0;
     }
     if (!active) {
         // Release once the head has been back at rest for a second.
@@ -464,9 +742,23 @@ static void updateHead() {
         return;
     }
     restingSince = 0;
-    if (!torqueOn) setTorque(true);
-    gazeNow.yaw = approach(gazeNow.yaw, gazeTarget.yaw, 15);  // at most 30 degrees per second
-    gazeNow.pitch = approach(gazeNow.pitch, gazeTarget.pitch, 15);
+    if (!torqueOn && !setTorque(true)) {
+        // Retried each tick; if the servos stay silent, power-cycle them.
+        if (!torqueFailingSince) torqueFailingSince = now;
+        if (now - torqueFailingSince > 3000) {
+            Serial.println("[bot] servos not responding; power-cycling them");
+            servos = Servos::Off;
+        }
+        return;
+    }
+    torqueFailingSince = 0;
+    if (searching) {
+        gazeNow = searchStep(gazeNow, search);  // 12 degrees per second
+    } else {
+        gazeNow.yaw = approach(gazeNow.yaw, gazeTarget.yaw, 20);  // at most 40 degrees per second
+        gazeNow.pitch = approach(gazeNow.pitch, gazeTarget.pitch, 20);
+    }
+    faceCameraSetGaze(gazeNow.yaw, gazeNow.pitch);
     const int nod = int(nodScale * nodTenths(now - nodStart, nodAmplitude, nodPeriod));
     const int pitch = pitchRaw(pitchZero, gazeNow.pitch + nod);
     if (pitch != sentPitch) moveServo(PITCH_SERVO_ID, sentPitch = pitch, 100);
@@ -546,7 +838,7 @@ void setup() {
         nvs_close(servoSettings);
     }
     Serial.printf("[bot] servo zero yaw=%d pitch=%d\n", yawZero, pitchZero);
-    Serial1.begin(1000000, SERIAL_8N1, 7, 6);
+    if (!servoBusBegin()) Serial.println("[bot] servo bus unavailable");
     String savedSsid, savedPassword;
     if (loadSavedWifi(savedSsid, savedPassword)) {
         // Fall back to the built-in network if the saved one is unavailable.
@@ -649,11 +941,29 @@ void loop() {
     }
     updateBodyLights();
     updateHead();
+    readServos();
+    // Live tracking state for the dashboard, a few times a second.
+    if (relayConnected && int32_t(millis() - nextHeadReport) >= 0) {
+        nextHeadReport = millis() + 300;
+        JsonDocument doc;
+        doc["type"] = "head";
+        doc["mode"] = headMode;
+        doc["yaw"] = gazeNow.yaw;
+        doc["pitch"] = gazeNow.pitch;
+        doc["targetYaw"] = gazeTarget.yaw;
+        doc["targetPitch"] = gazeTarget.pitch;
+        doc["nod"] = nodScale > 0;
+        doc["torque"] = torqueOn;
+        doc["faceAge"] = lastFaceAt ? int32_t(millis() - lastFaceAt) : -1;
+        String text;
+        serializeJson(doc, text);
+        socket.sendTXT(text);
+    }
     // One camera snapshot in flight at a time; the relay replies with any face.
     if (relayConnected && trackEnabled && (!frameInFlight || millis() - frameSentAt > 2000)) {
         uint8_t *frame;
         size_t frameLength;
-        if (faceCameraTakeFrame(frame, frameLength)) {
+        if (faceCameraTakeFrame(frame, frameLength, frameGaze.yaw, frameGaze.pitch)) {
             socket.sendBIN(frame, frameLength);
             free(frame);
             frameInFlight = true;

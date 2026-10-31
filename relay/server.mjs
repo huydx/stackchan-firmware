@@ -9,7 +9,7 @@ import { createToolRunner, toolDefinitions } from './tools.mjs';
 import { createFaceDetector } from './face-detector.mjs';
 
 export const CHUNK = 1024;
-const MAX_FRAME = 32768;
+const MAX_FRAME = 65536;
 export const WINDOW = 8192;
 export const MAX_QUEUE = 1536 * 1024;
 const expressions = ['neutral', 'happy', 'sad', 'angry', 'sleepy'];
@@ -104,6 +104,10 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
   let state = { deviceConnected: false, apiReady: false, activity: 'offline', micFrames: 0,
     playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
   let lastError = null, deviceInfo = null, wifiChange = null;
+  // Latest camera snapshot (memory only) and recent detections, for the local preview.
+  let snapshot = null, headState = null;
+  const faceTrace = [], modeHistory = [];
+  const HEAD_MODES = ['off', 'unavailable', 'waking', 'resting', 'searching', 'centering', 'locked', 'givingup', 'look', 'testing'];
   const startedAt = Date.now();
   const deviceConfig = () => {
     const settings = publicSettings(config);
@@ -145,6 +149,22 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       controls.test(text);
     },
     reconnect: () => { if (active) active.close(1000, 'New conversation'); },
+    look: ({ yaw, pitch }) => {
+      if (!controls) { const error = Error('Connect the robot first.'); error.status = 409; throw error; }
+      controls.look(Math.round(yaw * 10), Math.round(pitch * 10));
+    },
+    servoTest: () => {
+      if (!controls) { const error = Error('Connect the robot first.'); error.status = 409; throw error; }
+      controls.servoTest();
+    },
+    tracking: () => ({
+      connected: !!controls, head: headState, history: modeHistory, detector: faceDetector.state,
+      camera: deviceInfo?.camera ?? null, enabled: publicSettings(config).faceTracking,
+      face: snapshot ? { ...snapshot.face, at: snapshot.at } : null,
+      detections: faceTrace.slice(-30).map(entry => ({ at: entry.at, found: entry.found })),
+    }),
+    camera: () => snapshot,
+    faceTrace: () => faceTrace,
   });
   const http = createServer(async (req, res) => {
     if (await dashboard(req, res)) return;
@@ -191,7 +211,9 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       tool_choice: 'none', max_output_tokens: 512,
     } }),
     configure: () => toDevice(deviceConfig()),
-    wifi: request => toDevice({ type: 'wifi_set', ...request }) };
+    wifi: request => toDevice({ type: 'wifi_set', ...request }),
+    look: (yaw, pitch) => toDevice({ type: 'look', yaw, pitch }),
+    servoTest: () => toDevice({ type: 'servo_test' }) };
     const fail = code => {
       if (closed) return;
       lastError = { code, at: new Date().toISOString() };
@@ -250,8 +272,12 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
         // Camera snapshot: one at a time, answered with the largest face, if any.
         if (detecting || !publicSettings(config).faceTracking) return toDevice({ type: 'face', found: false });
         detecting = true;
-        faceDetector.detect(data.subarray(4)).then(face => {
+        const received = Date.now(), image = Buffer.from(data.subarray(4));
+        faceDetector.detect(image).then(face => {
           detecting = false;
+          snapshot = { image, face, at: received };
+          faceTrace.push({ at: received, ms: Date.now() - received, ...face });
+          if (faceTrace.length > 100) faceTrace.shift();
           if (!closed) toDevice(face.found ? { type: 'face', found: true, x: +face.x.toFixed(3), y: +face.y.toFixed(3) } : { type: 'face', found: false });
         });
         return;
@@ -275,7 +301,27 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
           savedNetwork: message.savedNetwork === true, storage: message.storage === true,
           volume: integer(message.volume), brightness: integer(message.brightness),
           camera: ['off', 'unavailable', 'searching', 'face'].includes(message.camera) ? message.camera : null,
-          cameraStackFree: integer(message.cameraStackFree), reset: text(message.reset, 24), at: Date.now() };
+          cameraStackFree: integer(message.cameraStackFree), reset: text(message.reset, 24),
+          head: { body: text(message.body, 16), servos: text(message.servos, 16),
+            yaw: integer(message.servoYaw), pitch: integer(message.servoPitch),
+            commandYaw: integer(message.commandYaw), commandPitch: integer(message.commandPitch),
+            supplyMv: integer(message.supplyMv), supplyMa: integer(message.supplyMa), vmEnable: integer(message.vmEnable), powerCycles: integer(message.powerCycles), rxBytes: integer(message.servoRxBytes),
+            writeReply: text(message.writeReply, 40), readReply: text(message.readReply, 40),
+            voltsYaw: integer(message.servoVoltsYaw), voltsPitch: integer(message.servoVoltsPitch),
+            servoTest: text(message.servoTest, 400), extOutput: message.extOutput === true, vbusMv: integer(message.vbusMv), extRetries: integer(message.extRetries) },
+          at: Date.now() };
+        return;
+      }
+      if (message?.type === 'head') {
+        // Live face tracking state, a few times a second.
+        const integer = value => Number.isInteger(value) ? value : null;
+        const mode = HEAD_MODES.includes(message.mode) ? message.mode : 'unavailable';
+        const now = Date.now();
+        if (modeHistory.at(-1)?.mode !== mode) modeHistory.push({ mode, at: now });
+        while (modeHistory.length > 2 && now - modeHistory[1].at > 120000) modeHistory.shift();
+        headState = { mode, yaw: integer(message.yaw), pitch: integer(message.pitch),
+          targetYaw: integer(message.targetYaw), targetPitch: integer(message.targetPitch),
+          nod: message.nod === true, torque: message.torque === true, faceAge: integer(message.faceAge), at: now };
         return;
       }
       if (message?.type === 'wifi_result') {

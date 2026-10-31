@@ -42,6 +42,32 @@ static inline size_t scsGoalPosition(uint8_t *out, uint8_t id, int raw, uint16_t
     return scsWrite(out, id, 42, data, sizeof data);  // GOAL_POSITION, GOAL_TIME, GOAL_SPEED
 }
 
+// Read PRESENT_POSITION (2 bytes at 56): FF FF id 04 02 38 02 checksum.
+static inline size_t scsReadPosition(uint8_t *out, uint8_t id) {
+    out[0] = out[1] = 0xff;
+    out[2] = id;
+    out[3] = 4;
+    out[4] = 0x02;  // INST_READ
+    out[5] = 56;
+    out[6] = 2;
+    out[7] = ~uint8_t(id + 4 + 0x02 + 56 + 2);
+    return 8;
+}
+
+// Finds the servo's reply in received bytes (FF FF id 04 error posH posL
+// checksum), skipping an echo of the request if the bus loops it back.
+// Returns the raw position, or -1 without a valid reply.
+static inline int scsParsePosition(const uint8_t *data, size_t length, uint8_t id) {
+    for (size_t i = 0; i + 8 <= length; ++i) {
+        const uint8_t *p = data + i;
+        if (p[0] != 0xff || p[1] != 0xff || p[2] != id || p[3] != 4) continue;
+        if (p[4] == 0x02 && p[5] == 56 && p[6] == 2) continue;  // our own request
+        if (uint8_t(~uint8_t(p[2] + p[3] + p[4] + p[5] + p[6])) != p[7]) continue;
+        return p[5] << 8 | p[6];
+    }
+    return -1;
+}
+
 static inline size_t scsTorque(uint8_t *out, uint8_t id, bool enabled) {
     const uint8_t data[1] = {uint8_t(enabled)};
     return scsWrite(out, id, 40, data, sizeof data);  // TORQUE_ENABLE

@@ -22,7 +22,7 @@ async function build(log) {
 export function largestFace(faces) {
   const face = (Array.isArray(faces) ? faces : []).filter(face => [face?.x, face?.y, face?.w, face?.h].every(Number.isFinite))
     .sort((a, b) => b.w * b.h - a.w * a.h)[0];
-  return face ? { found: true, x: face.x * 2 - 1, y: face.y * 2 - 1 } : { found: false };
+  return face ? { found: true, x: face.x * 2 - 1, y: face.y * 2 - 1, w: face.w, h: face.h } : { found: false };
 }
 
 export function createFaceDetector({ log = console, platform = process.platform, command = BINARY, prepare = build } = {}) {

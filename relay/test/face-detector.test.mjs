@@ -5,7 +5,7 @@ import { createFaceDetector, largestFace } from '../face-detector.mjs';
 test('largest face is converted to -1..1 from the image center', () => {
   assert.deepEqual(largestFace([]), { found: false });
   assert.deepEqual(largestFace([{ x: 0.5, y: 0.5, w: 0.1, h: 0.1 }, { x: 0.75, y: 0.25, w: 0.3, h: 0.3 }]),
-    { found: true, x: 0.5, y: -0.5 });
+    { found: true, x: 0.5, y: -0.5, w: 0.3, h: 0.3 });
   assert.deepEqual(largestFace([{ x: 'bad' }]), { found: false });
 });
 

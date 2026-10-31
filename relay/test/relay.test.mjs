@@ -209,3 +209,18 @@ test('camera snapshots are answered with the largest face, one at a time', { tim
   f.device.send(Buffer.alloc(CHUNK + 1));
   assert.equal((await f.received.next()).code, 'invalid_microphone_chunk');
 });
+
+test('head state reports feed the tracking view and its mode history', { timeout: 5000 }, async t => {
+  const f = await fixture(t);
+  const url = `http://127.0.0.1:${f.relay.http.address().port}/api/admin/tracking`;
+  for (const mode of ['searching', 'searching', 'centering', 'locked', 'bogus']) {
+    send(f.device, { type: 'head', mode, yaw: 120, pitch: 80, targetYaw: 150, targetPitch: 90, nod: true, torque: true, faceAge: 200 });
+  }
+  let data;
+  for (const end = Date.now() + 2000; data?.head?.mode !== 'unavailable' && Date.now() < end;) data = await (await fetch(url)).json();
+  assert.deepEqual(data.history.map(entry => entry.mode), ['searching', 'centering', 'locked', 'unavailable']);
+  assert.equal(data.head.yaw, 120);
+  assert.equal(data.head.nod, true);
+  assert.equal(data.connected, true);
+  assert.deepEqual(f.errors, [], 'head reports do not end the session');
+});

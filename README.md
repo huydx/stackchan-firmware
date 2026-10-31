@@ -153,8 +153,20 @@ small grayscale camera snapshots (160x120 JPEG, about three a second) to the
 relay, which finds faces with macOS's Vision framework through a Swift helper
 (`relay/face/FaceDetect.swift`, compiled on first use into the ignored
 `relay/.build/`). Snapshots stay on this Mac and are not stored. The on-device
-face detector does not fit in the RealtimeBot partition. Reverse switches
-correct the direction if the head turns away. While speaking, the head nods
+face detector does not fit in the RealtimeBot partition. Tracking runs a
+small state machine: search (a slow sweep for up to 20 s), center a found face
+for 5-10 s, stay locked on while it is there, search again when it is gone,
+and give up (back to the home pose) when a search finds nothing. The
+dashboard's Face tracking panel shows the live state, camera view, gaze and
+a 60 s timeline. The camera uses the sensor's grayscale output (its RGB565
+output corrupts bright areas). Reverse switches exist for unusual mounts;
+the default directions were measured on this robot.
+
+For troubleshooting, the local admin API also offers `POST /api/admin/look`
+(point the head), `POST /api/admin/servo-test` (servo read-back and a small
+move, result in status), `GET /api/admin/camera` (latest snapshot, memory
+only) and `GET /api/admin/tracking`. The firmware power-cycles the servos at
+start-up and whenever they stop acknowledging commands. While speaking, the head nods
 slowly; both apply live from the Robot section.
 
 **Live information** tools let the model look things up instead of guessing:

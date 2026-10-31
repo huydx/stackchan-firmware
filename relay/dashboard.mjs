@@ -66,6 +66,24 @@ export function dashboardHandler(controller) {
         controller.test(value.text.trim()); json(res, 200, { ok: true });
       } else if (route === '/api/admin/wifi' && req.method === 'POST') {
         controller.wifi(await body(req)); json(res, 202, { ok: true });
+      } else if (route === '/api/admin/look' && req.method === 'POST') {
+        const { yaw, pitch } = await body(req);
+        if (![yaw, pitch].every(Number.isFinite) || Math.abs(yaw) > 70 || pitch < 0 || pitch > 45) {
+          throw Error('Use yaw -70..70 and pitch 0..45 degrees.');
+        }
+        controller.look({ yaw, pitch }); json(res, 200, { ok: true });
+      } else if (route === '/api/admin/servo-test' && req.method === 'POST') {
+        await body(req); controller.servoTest(); json(res, 200, { ok: true });
+      } else if (route === '/api/admin/camera' && req.method === 'GET') {
+        const shot = controller.camera?.();
+        if (!shot) { json(res, 404, { error: 'No camera snapshot yet.' }); return true; }
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store',
+          'X-Face': JSON.stringify(shot.face), 'X-Captured-At': String(shot.at) });
+        res.end(shot.image);
+      } else if (route === '/api/admin/tracking' && req.method === 'GET') {
+        json(res, 200, controller.tracking?.() || {});
+      } else if (route === '/api/admin/camera/trace' && req.method === 'GET') {
+        json(res, 200, controller.faceTrace?.() || []);
       } else if (route === '/api/admin/reconnect' && req.method === 'POST') {
         await body(req); controller.reconnect(); json(res, 200, { ok: true });
       } else json(res, 404, { error: 'Not found.' });

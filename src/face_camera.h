@@ -8,9 +8,11 @@
 // Start before audio: the camera borrows the internal I2C bus during init.
 bool faceCameraBegin();
 void faceCameraSetEnabled(bool enabled);
-// Takes ownership of the newest snapshot: "FRM1" + 160x120 grayscale JPEG.
-// The caller must free() it.
-bool faceCameraTakeFrame(uint8_t *&message, size_t &length);
+// Where the head points now (tenths of a degree), recorded with each snapshot.
+void faceCameraSetGaze(int yaw, int pitch);
+// Takes ownership of the newest snapshot: "FRM1" + 320x240 grayscale JPEG,
+// with the gaze it was taken at. The caller must free() it.
+bool faceCameraTakeFrame(uint8_t *&message, size_t &length, int &yaw, int &pitch);
 // Relay result for the last snapshot.
 void faceCameraSetFace(float x, float y);
 // Latest face position (normalized -1..1 from center) and its age in ms.
