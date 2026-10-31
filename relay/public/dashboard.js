@@ -92,6 +92,8 @@ function renderStatus(status) {
   $('reconnectButton').disabled = !status.deviceConnected || busy;
   renderWifi(status);
   renderCamera(status);
+  $('nowPlaying').hidden = !status.music;
+  if (status.music) $('songTitle').textContent = [status.music.title, status.music.artist].filter(Boolean).join(' · ');
   if (status.lastError) {
     $('pageError').textContent = `The last session reported ${status.lastError.code}. Review your settings or choose another model.`;
     $('pageError').hidden = false;
@@ -187,6 +189,11 @@ $('wifiSwitchButton').addEventListener('click', () => {
   changeWifi({ ssid, password: $('wifiNewPassword').value }, `Sent ${ssid} to the robot. Watch for it to reconnect.`);
 });
 $('wifiBuiltinButton').addEventListener('click', () => changeWifi({ builtin: true }, 'Switching the robot back to its built-in network.'));
+$('stopMusicButton').addEventListener('click', async () => {
+  try { await api('music/stop', { method: 'POST', body: '{}' }); notify('Stopping the song.'); }
+  catch (error) { notify(error.message, true); }
+  finally { await refreshStatus(); }
+});
 $('reconnectButton').addEventListener('click', async () => {
   $('reconnectButton').disabled = true;
   try { await api('reconnect', { method: 'POST', body: '{}' }); notify('Starting a new conversation. Your saved settings stay the same.'); }

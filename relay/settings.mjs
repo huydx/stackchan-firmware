@@ -19,7 +19,7 @@ const DEFAULTS = {
   silenceDurationMs: 500, eagerness: 'auto', noiseReduction: 'off', expressionTools: true,
   backendModel: 'gpt-4.1-mini', speakerVolume: 220, screenBrightness: 127, headNod: true, nodAngle: 6, nodPeriodMs: 2400,
   faceTracking: true, trackReverseX: false, trackReverseY: false,
-  timeTool: true, weatherTool: true, webSearchTool: true, location: '', timezone: '', searchModel: 'gpt-4.1-mini',
+  timeTool: true, weatherTool: true, webSearchTool: true, musicTool: true, location: '', timezone: '', searchModel: 'gpt-4.1-mini',
   backendInstructions: 'Control the robot face using set_expression when its mood should change. Use the time, weather and web search tools for current information instead of guessing. You cannot move the robot or control other devices. Return a brief factual result.',
 };
 
@@ -64,7 +64,7 @@ export function validateSettings(value) {
       case 'turnDetection': choice(['server_vad', 'semantic_vad']); break;
       case 'eagerness': choice(['auto', 'low', 'medium', 'high']); break;
       case 'noiseReduction': choice(['off', 'near_field', 'far_field']); break;
-      case 'expressionTools': case 'headNod': case 'faceTracking': case 'trackReverseX': case 'trackReverseY': case 'timeTool': case 'weatherTool': case 'webSearchTool':
+      case 'expressionTools': case 'headNod': case 'faceTracking': case 'trackReverseX': case 'trackReverseY': case 'timeTool': case 'musicTool': case 'weatherTool': case 'webSearchTool':
         if (typeof val !== 'boolean') throw Error(`${key} must be true or false.`); break;
       case 'location': text(100); break;
       case 'timezone': if (typeof val !== 'string' || (val && !validTimezone(val))) throw Error('Use an IANA time zone such as Asia/Tokyo, or leave it empty.'); break;

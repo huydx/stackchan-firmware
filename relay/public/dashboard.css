@@ -1385,3 +1385,52 @@ footer span {
     animation:none
   }
 }
+
+/* Now singing */
+.now-playing {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-top:18px;
+  padding:10px 12px;
+  border:1px solid #4b6651;
+  border-radius:10px;
+  background:#294b3d
+}
+.now-playing .note {
+  font-size:18px;
+  color:#9fe0b8;
+  animation:tracker-pulse 1.2s ease-in-out infinite
+}
+.now-playing > span:nth-child(2) {
+  flex:1;
+  min-width:0
+}
+.now-playing small {
+  display:block;
+  font:8px var(--mono);
+  letter-spacing:1.3px;
+  color:#90aa96
+}
+.now-playing strong {
+  display:block;
+  font-size:11px;
+  color:#e6efdf;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+.stop-music {
+  border:0;
+  border-radius:6px;
+  padding:6px 10px;
+  font-size:10px;
+  font-weight:600;
+  background:#e6efdf;
+  color:#1c3833
+}
+@media(prefers-reduced-motion:reduce) {
+  .now-playing .note {
+    animation:none
+  }
+}

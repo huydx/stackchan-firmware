@@ -80,6 +80,8 @@ export function dashboardHandler(controller) {
         res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store',
           'X-Face': JSON.stringify(shot.face), 'X-Captured-At': String(shot.at) });
         res.end(shot.image);
+      } else if (route === '/api/admin/music/stop' && req.method === 'POST') {
+        await body(req); controller.stopMusic?.(); json(res, 200, { ok: true });
       } else if (route === '/api/admin/tracking' && req.method === 'GET') {
         json(res, 200, controller.tracking?.() || {});
       } else if (route === '/api/admin/camera/trace' && req.method === 'GET') {

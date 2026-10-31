@@ -77,6 +77,9 @@
               <label class="toggle-field"><span>Weather</span><span class="toggle-line"><input type="checkbox" name="weatherTool" role="switch"><span>Now, today, tomorrow</span></span><small>Free Open-Meteo forecast; only the city name is sent.</small></label>
               <label class="toggle-field"><span>Web search</span><span class="toggle-line"><input type="checkbox" name="webSearchTool" id="webSearchTool" role="switch"><span>News and recent facts</span></span><small id="searchHelp">OpenAI web search; each search adds a small charge.</small></label>
             </div>
+            <div class="fields two spaced">
+              <label class="toggle-field"><span>Sing (play) songs</span><span class="toggle-line"><input type="checkbox" name="musicTool" role="switch"><span>Play songs from YouTube Music when asked to sing</span></span><small>Downloaded with yt-dlp on this Mac (against YouTube's terms). Tap the robot to stop. Realtime models only.</small></label>
+            </div>
             <div class="fields three spaced">
               <label>Home city<input name="location" maxlength="100" placeholder="e.g. Tokyo"><small>Used when you don't name a place.</small></label>
               <label>Time zone<input name="timezone" id="timezone" maxlength="64" spellcheck="false"><small id="timezoneHelp">Leave empty to use this Mac's time zone.</small></label>
@@ -142,6 +145,7 @@
           <div class="robot-screen" aria-hidden="true"><div class="face-eyes"><span></span><span></span></div><div class="face-mouth"></div></div>
           <h2 id="activityText">Waiting for the robot</h2><p id="activityHelp">Your relay's current session will appear here.</p>
           <dl class="session-details"><div><dt>Running model</dt><dd id="runningModel">—</dd></div><div><dt>API session</dt><dd id="apiState">—</dd></div><div><dt>Microphone</dt><dd id="micState">—</dd></div><div><dt>Audio queued</dt><dd id="audioQueued">—</dd></div></dl>
+          <div id="nowPlaying" class="now-playing" hidden><span class="note" aria-hidden="true">♪</span><span><small>NOW SINGING</small><strong id="songTitle"></strong></span><button type="button" id="stopMusicButton" class="stop-music">■ Stop</button></div>
           <button type="button" class="button session-button" id="reconnectButton" disabled>↻ &nbsp; New conversation</button>
         </section>
         <section class="card test-card"><p class="eyebrow">HEAR THE DIFFERENCE</p><h3>Try a short phrase.</h3><label for="testPhrase" class="sr-only">Voice test phrase</label><textarea id="testPhrase" maxlength="300" rows="3">こんにちは。声のテストです。</textarea><button type="button" id="testButton" class="button secondary full" disabled>▶ &nbsp; Test voice</button><p class="footnote">Uses the saved settings and normal API usage. GPT-Live may paraphrase.</p></section>

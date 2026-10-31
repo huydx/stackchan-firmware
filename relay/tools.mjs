@@ -21,6 +21,12 @@ const DEFINITIONS = {
     description: 'Get current weather and the forecast for today and tomorrow. Never guess the weather.',
     properties: { location: { type: ['string', 'null'], description: 'City name, preferably in English, or null for the robot\'s home location.' } },
   },
+  // Named play_song, not sing: the voice models decline requests to sing.
+  play_song: {
+    setting: 'musicTool',
+    description: 'Play a real recording of a song from YouTube Music on your speaker. Whenever the user asks you to sing, play, or put on a song or music, call this right away instead of declining: you cannot sing with your own voice, but you can play the song. Say one short line first, such as "Here it comes!", then stay silent while it plays. The user taps the screen to stop it.',
+    properties: { query: { type: 'string', description: 'Song title and artist, e.g. "Idol YOASOBI".' } },
+  },
   web_search: {
     setting: 'webSearchTool',
     description: 'Search the web for news, recent events, prices, schedules or other facts that may have changed. Say a short phrase such as "let me check" first.',

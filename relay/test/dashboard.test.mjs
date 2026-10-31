@@ -133,9 +133,9 @@ test('supported controls map to API fields and incompatible controls are omitted
   assert.equal(update.audio.input.turn_detection.type, 'semantic_vad');
   assert.equal(update.audio.input.turn_detection.eagerness, 'low');
   assert.equal(update.audio.input.noise_reduction.type, 'near_field');
-  assert.deepEqual(update.tools.map(tool => tool.name), ['get_current_time', 'get_weather', 'web_search']);
+  assert.deepEqual(update.tools.map(tool => tool.name), ['get_current_time', 'get_weather', 'play_song', 'web_search']);
   assert.equal(update.tool_choice, 'auto');
-  const none = sessionUpdate(withSettings(config, { timeTool: false, weatherTool: false, webSearchTool: false })).session;
+  const none = sessionUpdate(withSettings(config, { timeTool: false, weatherTool: false, webSearchTool: false, musicTool: false })).session;
   assert.deepEqual(none.tools, []);
   assert.equal(none.tool_choice, 'none');
   assert.throws(() => withSettings(base, { timezone: 'Mars/Olympus' }), /time zone/);

@@ -172,7 +172,13 @@ slowly; both apply live from the Robot section.
 **Live information** tools let the model look things up instead of guessing:
 the current time (computed locally), weather (Open-Meteo, free, only the city
 name is sent) and web search (OpenAI Responses `web_search`, billed per search;
-not available with Azure). Each can be switched off, and a home city and time
+not available with Azure). A play_song tool plays songs: the relay finds
+the top YouTube Music result with yt-dlp (`brew install yt-dlp`; this breaks
+YouTube's Terms of Service) and ffmpeg converts it to the robot's audio, so
+the mouth, nod and lights follow the music. Tap the robot or use Stop in the
+dashboard to end a song; while audio plays a tap stops it instead of muting.
+It is named play_song because the voice models decline requests to sing.
+Each can be switched off, and a home city and time
 zone are used when the user names none. They work in Realtime and GPT-Live mode.
 
 The dashboard does not expose API keys or device tokens. Foreign origins and

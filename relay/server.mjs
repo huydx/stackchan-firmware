@@ -7,6 +7,7 @@ import { DEVICE_KEYS, capabilities, loadSettings, publicSettings, saveSettings, 
 import { dashboardHandler } from './dashboard.mjs';
 import { createToolRunner, toolDefinitions } from './tools.mjs';
 import { createFaceDetector } from './face-detector.mjs';
+import { createMusicPlayer } from './music.mjs';
 
 export const CHUNK = 1024;
 const MAX_FRAME = 65536;
@@ -52,12 +53,16 @@ export function readConfig(env = process.env) {
 
 export function sessionUpdate(config) {
   const settings = publicSettings(config);
+  const dataTools = toolDefinitions(settings, config.provider);
+  // The voice models decline to sing unless they know a song can be played.
+  const musicHint = dataTools.some(tool => tool.name === 'play_song')
+    ? '\n\nYou can play songs: when asked to sing or play music, call play_song with the song name instead of saying you cannot sing. The real recording plays on your speaker.' : '';
   const result = {
     type: 'session.update',
     session: {
       type: 'realtime',
       output_modalities: ['audio'],
-      instructions: config.instructions,
+      instructions: config.instructions + musicHint,
       max_output_tokens: settings.maxOutputTokens,
       audio: {
         input: {
@@ -81,7 +86,7 @@ export function sessionUpdate(config) {
           properties: { expression: { type: 'string', enum: expressions } },
           required: ['expression'],
         },
-      }] : [], ...toolDefinitions(settings, config.provider)],
+      }] : [], ...dataTools],
     },
   };
   result.session.tool_choice = result.session.tools.length ? 'auto' : 'none';
@@ -99,13 +104,13 @@ function authorized(header, token) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
-export function createRelay(config, log = console, { fetch, faceDetector = createFaceDetector({ log }) } = {}) {
+export function createRelay(config, log = console, { fetch, faceDetector = createFaceDetector({ log }), musicPlayer = createMusicPlayer({ log }) } = {}) {
   let active, controls;
   let state = { deviceConnected: false, apiReady: false, activity: 'offline', micFrames: 0,
     playedAudioBytes: 0, queuedAudioMs: 0, lastMicAt: null };
   let lastError = null, deviceInfo = null, wifiChange = null;
   // Latest camera snapshot (memory only) and recent detections, for the local preview.
-  let snapshot = null, headState = null;
+  let snapshot = null, headState = null, nowPlaying = null;
   const faceTrace = [], modeHistory = [];
   const HEAD_MODES = ['off', 'unavailable', 'waking', 'resting', 'searching', 'centering', 'locked', 'givingup', 'look', 'testing'];
   const startedAt = Date.now();
@@ -119,7 +124,7 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
     config: () => config,
     status: () => ({ ...state,
       activity: state.activity === 'listening' && Date.now() - state.lastMicAt > 1500 ? 'idle' : state.activity,
-      lastError, device: deviceInfo, wifi: wifiChange, faceDetector: faceDetector.state, model: config.model || 'gpt-realtime-2.1-mini',
+      lastError, device: deviceInfo, wifi: wifiChange, faceDetector: faceDetector.state, music: nowPlaying, model: config.model || 'gpt-realtime-2.1-mini',
       protocol: config.protocol || 'realtime', uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) }),
     save: async update => {
       const next = withSettings(config, update);
@@ -163,6 +168,7 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       face: snapshot ? { ...snapshot.face, at: snapshot.at } : null,
       detections: faceTrace.slice(-30).map(entry => ({ at: entry.at, found: entry.found })),
     }),
+    stopMusic: () => controls?.stopMusic(),
     camera: () => snapshot,
     faceTrace: () => faceTrace,
   });
@@ -197,6 +203,7 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
     });
     let ready = false, busy = false, started = false, ending = false, endSent = false;
     let queuedBytes = 0, inFlight = 0, closed = false, detecting = false;
+    let musicActive = false, musicPaused = false, musicLeftover = Buffer.alloc(0);
     const queue = [], sentSizes = [];
     let cloudAlive = true, deviceAlive = true;
     let lastProgress = Date.now();
@@ -211,6 +218,7 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       tool_choice: 'none', max_output_tokens: 512,
     } }),
     configure: () => toDevice(deviceConfig()),
+    stopMusic: () => { if (musicActive) musicPlayer.stop(); },
     wifi: request => toDevice({ type: 'wifi_set', ...request }),
     look: (yaw, pitch) => toDevice({ type: 'look', yaw, pitch }),
     servoTest: () => toDevice({ type: 'servo_test' }) };
@@ -229,6 +237,7 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       clearInterval(heartbeat);
       clearTimeout(setupTimeout);
       queue.length = sentSizes.length = 0;
+      if (musicActive) musicPlayer.stop();
       if (upstream.readyState === WebSocket.CONNECTING) upstream.terminate();
       else upstream.close();
     }
@@ -240,6 +249,11 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
         inFlight += chunk.length;
         sentSizes.push(chunk.length);
         device.send(chunk, { binary: true }, error => { if (error) fail('device_send'); });
+      }
+      // A paused song resumes once the queue has room again.
+      if (musicPaused && queuedBytes < MAX_QUEUE / 4) {
+        musicPaused = false;
+        musicPlayer.resume();
       }
       if (ending && !queuedBytes && !inFlight && !endSent) {
         endSent = true;
@@ -294,6 +308,10 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       let message;
       try { message = JSON.parse(data.toString()); } catch { return fail('invalid_device_json'); }
       if (message?.type === 'hello') return;
+      if (message?.type === 'stop') {  // screen tapped during playback
+        if (musicActive) musicPlayer.stop();
+        return;
+      }
       if (message?.type === 'device_status') {
         const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : null;
         const integer = value => Number.isInteger(value) ? value : null;
@@ -344,9 +362,60 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       } else fail('unknown_device_event');
     });
 
+    // A song streams into the same queue as speech, so the mouth, nod and
+    // lights follow it, and the same ACK window paces it.
+    function startMusic(query) {
+      musicActive = true;
+      busy = true;
+      const startedAt = Date.now();
+      return musicPlayer.play(query, {
+        onAudio: chunk => {
+          if (closed) return false;
+          lastProgress = Date.now();
+          const data = musicLeftover.length ? Buffer.concat([musicLeftover, chunk]) : chunk;
+          const whole = data.length - data.length % CHUNK;
+          for (let i = 0; i < whole; i += CHUNK) {
+            queue.push(Buffer.from(data.subarray(i, i + CHUNK)));
+            queuedBytes += CHUNK;
+          }
+          musicLeftover = Buffer.from(data.subarray(whole));
+          if (!started) {
+            started = true;
+            session.activity = 'speaking';
+            toDevice({ type: 'audio_start' });
+          }
+          pump();
+          musicPaused = queuedBytes > MAX_QUEUE / 2;
+          return !musicPaused;
+        },
+        onEnd: reason => {
+          musicActive = musicPaused = false;
+          nowPlaying = null;
+          if (closed) return;
+          const tail = musicLeftover.length - musicLeftover.length % 2;
+          if (reason === 'finished' && tail) {
+            queue.push(Buffer.from(musicLeftover.subarray(0, tail)));
+            queuedBytes += tail;
+          } else if (reason !== 'finished') {
+            queue.length = 0;  // stopped: drop what has not been sent yet
+            queuedBytes = 0;
+          }
+          musicLeftover = Buffer.alloc(0);
+          if (started) { ending = true; pump(); } else { busy = false; session.activity = 'idle'; }
+        },
+      }).then(result => {
+        if (result.ok) nowPlaying = { title: result.title, artist: result.artist, duration: result.duration, startedAt };
+        else musicActive = false;
+        return result;
+      });
+    }
     async function call(item) {
       let args;
       try { args = JSON.parse(item.arguments); } catch { return { ok: false, error: 'Invalid arguments' }; }
+      if (item.name === 'play_song') {
+        if (config.protocol === 'live' || !publicSettings(config).musicTool) return { ok: false, error: 'Singing is not available.' };
+        return startMusic(args?.query);
+      }
       if (item.name !== 'set_expression') return runTool(item.name, args);
       if (config.expressionTools === false || !expressions.includes(args?.expression)) return { ok: false, error: 'Unsupported tool or expression' };
       toDevice({ type: 'expression', value: args.expression });
@@ -361,7 +430,8 @@ export function createRelay(config, log = console, { fetch, faceDetector = creat
       calls.forEach((item, index) => toCloud({ type: 'conversation.item.create', item: {
         type: 'function_call_output', call_id: item.call_id, output: JSON.stringify(results[index]),
       } }));
-      toCloud({ type: 'response.create' });
+      // A song that started speaks for itself; otherwise let the model answer.
+      if (!calls.some((item, index) => item.name === 'play_song' && results[index].ok)) toCloud({ type: 'response.create' });
     }
     upstream.on('message', (data, binary) => {
       if (closed) return;

@@ -57,7 +57,8 @@ export class LiveTransport extends EventEmitter {
             instructions: this.config.backendInstructions ?? 'Control the robot face using set_expression when its mood should change. You cannot move the robot or control other devices. Return a brief factual result.',
             max_output_tokens: 256,
             parallel_tool_calls: false,
-            tools: event.session.tools.map(tool => ({ ...tool, strict: true })),
+            // Live keeps streaming its own audio, which would fight a song.
+            tools: event.session.tools.filter(tool => tool.name !== 'play_song').map(tool => ({ ...tool, strict: true })),
           },
         },
       };

@@ -863,8 +863,11 @@ void setup() {
 void loop() {
     M5.update();
     if (M5.Touch.getDetail().wasClicked()) {
-        muted = !muted;
-        if (!output) {
+        if (output) {
+            // While audio plays the robot cannot hear "stop", so a tap stops a song.
+            if (relayConnected) sendControl("stop");
+        } else {
+            muted = !muted;
             stopMic();
             if (ready) status = muted ? "Muted" : "Listening";
         }

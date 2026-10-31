@@ -224,3 +224,46 @@ test('head state reports feed the tracking view and its mode history', { timeout
   assert.equal(data.connected, true);
   assert.deepEqual(f.errors, [], 'head reports do not end the session');
 });
+
+test('a play_song call streams the song into playback, stays quiet, and a tap stops it', { timeout: 5000 }, async t => {
+  let song;
+  const musicPlayer = { playing: false, resume() {},
+    play: (query, handlers) => { song = { query, ...handlers }; musicPlayer.playing = true;
+      return Promise.resolve({ ok: true, title: 'Idol', artist: 'YOASOBI', duration: 213 }); },
+    stop: () => { musicPlayer.playing = false; song.onEnd('stopped'); } };
+  const f = await fixture(t, { musicPlayer });
+  send(f.upstream, { type: 'session.updated' });
+  await f.received.next();
+  send(f.upstream, { type: 'response.created' });
+  send(f.upstream, { type: 'response.done', response: { status: 'completed', output: [
+    { type: 'function_call', name: 'play_song', call_id: 'song', arguments: '{"query":"Idol YOASOBI"}' }] } });
+  const output = await f.sent.next();
+  assert.equal(output.item.call_id, 'song');
+  assert.equal(JSON.parse(output.item.output).title, 'Idol');
+  assert.equal(song.query, 'Idol YOASOBI');
+  // Odd-sized chunks are regrouped into whole frames.
+  song.onAudio(Buffer.alloc(CHUNK + 300));
+  song.onAudio(Buffer.alloc(CHUNK - 300));
+  assert.deepEqual(await f.received.next(), { type: 'audio_start' });
+  assert.equal((await f.received.next()).length, CHUNK);
+  assert.equal((await f.received.next()).length, CHUNK);
+  send(f.device, { type: 'stop' });
+  send(f.device, { type: 'played', bytes: CHUNK });
+  send(f.device, { type: 'played', bytes: CHUNK });
+  assert.deepEqual(await f.received.next(), { type: 'audio_end' });
+  assert.equal(musicPlayer.playing, false);
+  await tick();
+  assert.equal(f.sent.messages.length, 0, 'no response.create while a song plays');
+  assert.deepEqual(f.errors, []);
+});
+
+test('a song that cannot be found lets the model answer', { timeout: 5000 }, async t => {
+  const musicPlayer = { playing: false, resume() {}, stop() {}, play: () => Promise.resolve({ ok: false, error: 'No playable song was found.' }) };
+  const f = await fixture(t, { musicPlayer });
+  send(f.upstream, { type: 'session.updated' });
+  await f.received.next();
+  send(f.upstream, { type: 'response.done', response: { status: 'completed', output: [
+    { type: 'function_call', name: 'play_song', call_id: 'song', arguments: '{"query":"nothing"}' }] } });
+  assert.equal(JSON.parse((await f.sent.next()).item.output).ok, false);
+  assert.deepEqual(await f.sent.next(), { type: 'response.create' });
+});
