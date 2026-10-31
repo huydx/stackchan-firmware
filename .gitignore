@@ -5,3 +5,4 @@ relay/node_modules/
 relay/settings.json
 relay/.settings-*.tmp
 relay/.build/
+tests/__pycache__/

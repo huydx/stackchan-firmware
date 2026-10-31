@@ -36,7 +36,7 @@ camera, PIR, or body LED control is included.
   This avoids changing Launcher, original StackChan, and Muse NVS namespaces.
   Wi-Fi and relay configuration are compiled into this app instead.
 - The original installation's layout is documented in
-  [the Muse Launcher profile](../../esp32/tools/muse/stackchan-launcher/README.md).
+  [the Muse Launcher profile](https://github.com/huydx/muse-gadget-sdk/blob/main/esp32/tools/muse/stackchan-launcher/README.md).
   Its `0xaa0000` 4 MiB slot is **occupied by Muse**, not free space. This
   app must not be installed over that slot to keep Muse.
 - On the configured device, `RealtimeBot` was added as OTA_2 at **0xea0000**,
@@ -63,7 +63,7 @@ From the repo root:
 ```sh
 python3.12 -m venv /tmp/stackchan-realtime-pio
 /tmp/stackchan-realtime-pio/bin/pip install platformio
-cp firmware/stackchan-realtime/include/bot_config.example.h firmware/stackchan-realtime/include/bot_config.h
+cp include/bot_config.example.h include/bot_config.h
 openssl rand -hex 32
 ```
 
@@ -72,7 +72,7 @@ LAN IP, and that random token. Match the token in the relay's `.env` below.
 The config file is ignored by Git. No cloud API key belongs in firmware.
 
 ```sh
-/tmp/stackchan-realtime-pio/bin/pio run -d firmware/stackchan-realtime
+/tmp/stackchan-realtime-pio/bin/pio run -d .
 ```
 
 Output: `.pio/build/stackchan-realtime/firmware.bin` inside this directory.
@@ -85,7 +85,7 @@ Configured binaries contain your Wi-Fi password and device token: keep them priv
 Use Node.js 22+. On a computer reachable from the bot:
 
 ```sh
-cd firmware/stackchan-realtime/relay
+cd relay
 npm ci
 cp .env.example .env
 ```
@@ -236,8 +236,8 @@ reach the speaker before shutdown. Its output queue is capped at 1.5 MiB;
 overflow or invalid protocol data closes the session instead of dropping audio.
 
 ```sh
-python3 -m unittest discover -s firmware/stackchan-realtime/tests
-cd firmware/stackchan-realtime/relay
+python3 -m unittest discover -s tests
+cd relay
 npm test
 npm audit
 ```

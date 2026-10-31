@@ -3,7 +3,8 @@
 
 // Colors for the StackChan body's 12 RGB LEDs, as RGB565. Hardware access
 // lives in main.cpp; this stays host-testable.
-// Matches esp32/components/muse/muse_stackchan_light.c (brightness 48 / 255).
+// Matches muse-gadget-sdk's esp32/components/muse/muse_stackchan_light.c
+// (brightness 48 / 255).
 enum class BodyEffect : uint8_t { Off, Muted, Speaking };
 
 static constexpr uint16_t BODY_RED = (48 >> 3) << 11;
